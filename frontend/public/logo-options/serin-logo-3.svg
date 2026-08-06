@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" role="img" aria-labelledby="title">
+  <title id="title">Serin logo option 3</title>
+  <rect x="20" y="25" width="82" height="70" rx="16" fill="#ffffff" stroke="#17231f" stroke-width="5"/>
+  <rect x="39" y="67" width="10" height="17" rx="3" fill="#2f6f9f"/>
+  <rect x="56" y="52" width="10" height="32" rx="3" fill="#0f8a5f"/>
+  <rect x="73" y="39" width="10" height="45" rx="3" fill="#17231f"/>
+  <path d="M38 45h29c10 0 18 8 18 18" fill="none" stroke="#b98217" stroke-width="5" stroke-linecap="round"/>
+  <text x="124" y="70" fill="#17231f" font-family="Inter, DM Sans, Arial, sans-serif" font-size="42" font-weight="800" letter-spacing="-0.7">serin</text>
+  <path d="M124 82h49M184 82h48" stroke="#d9e4df" stroke-width="5" stroke-linecap="round"/>
+</svg>

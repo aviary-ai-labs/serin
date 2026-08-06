@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+.env
+.pytest_cache
+__pycache__
+*.pyc
+node_modules
+frontend/dist
+artifacts
+logs
+data
+.DS_Store
+docs/screenshots
+**/*.log

@@ -1,0 +1,38 @@
+# Run Serin with one command:  docker compose up
+#
+# The container hosts the FastAPI backend AND the built React SPA on the
+# same port — open http://localhost:8890 and you're in.
+#
+# All persistent state (SQLite db) lives in the named volume so an upgrade
+# (rebuild + recreate) never loses your portfolio.
+
+services:
+  serin:
+    build: .
+    image: serin:latest
+    container_name: serin
+    restart: unless-stopped
+    ports:
+      - "8890:8890"
+    environment:
+      # Free Yahoo Finance fallback works out of the box. Set FMP_API_KEY,
+      # ANTHROPIC_API_KEY etc. here to enable the matching connectors, or
+      # configure them later in the Connectors portal.
+      SERIN_AI_PROVIDER: ${SERIN_AI_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      FMP_API_KEY: ${FMP_API_KEY:-}
+      SNAPTRADE_CLIENT_ID: ${SNAPTRADE_CLIENT_ID:-}
+      SNAPTRADE_CONSUMER_KEY: ${SNAPTRADE_CONSUMER_KEY:-}
+      SERIN_SMTP_HOST: ${SERIN_SMTP_HOST:-}
+      SERIN_SMTP_USERNAME: ${SERIN_SMTP_USERNAME:-}
+      SERIN_SMTP_PASSWORD: ${SERIN_SMTP_PASSWORD:-}
+      SERIN_EMAIL_TO: ${SERIN_EMAIL_TO:-}
+    volumes:
+      - serin_data:/data
+      - serin_logs:/app/logs
+
+volumes:
+  serin_data:
+  serin_logs:

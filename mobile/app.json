@@ -1,0 +1,64 @@
+{
+  "expo": {
+    "name": "Serin",
+    "slug": "serin",
+    "version": "0.9.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "serin",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f1612"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "money.serin.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Serin uses the camera to scan the pairing QR code and to snap brokerage statements for Smart Import.",
+        "NSPhotoLibraryUsageDescription": "Serin lets you pick a brokerage screenshot for Smart Import.",
+        "NSFaceIDUsageDescription": "Serin can require Face ID to unlock the app.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#17231f"
+      },
+      "package": "money.serin.app",
+      "versionCode": 1,
+      "permissions": ["CAMERA", "USE_BIOMETRIC", "POST_NOTIFICATIONS"]
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "./plugins/withFmtConsteval",
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Serin uses the camera to scan pairing QR codes and snap statements for Smart Import."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Serin lets you pick a brokerage screenshot for Smart Import."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Serin can require Face ID to unlock the app."
+        }
+      ],
+      "expo-notifications"
+    ]
+  }
+}

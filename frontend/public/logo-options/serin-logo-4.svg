@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" role="img" aria-labelledby="title">
+  <title id="title">Serin logo option 4</title>
+  <path d="M61 18 96 32v27c0 24-15 39-35 47-20-8-35-23-35-47V32l35-14Z" fill="#17231f"/>
+  <path d="M48 77V42h28v10H59v9h15v9H59v7H48Z" fill="#f6faf8"/>
+  <path d="M45 86c8-2 13-6 18-12 5 5 11 8 18 9" fill="none" stroke="#7fd1ab" stroke-width="4.5" stroke-linecap="round"/>
+  <circle cx="82" cy="52" r="3.5" fill="#b98217"/>
+  <text x="122" y="70" fill="#17231f" font-family="Inter, DM Sans, Arial, sans-serif" font-size="42" font-weight="780" letter-spacing="-1">serin</text>
+  <text x="124" y="91" fill="#50645c" font-family="JetBrains Mono, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" letter-spacing="1.4">PRIVATE AI PORTFOLIO</text>
+</svg>

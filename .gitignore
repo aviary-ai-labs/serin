@@ -1,0 +1,46 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+data/
+logs/
+artifacts/
+
+node_modules/
+frontend/dist/
+*.log
+.DS_Store
+
+# Local agent/editor state — never someone else's business.
+.claude/settings.local.json
+
+# Signing keys, in any form. The Ed25519 key that signs licence tokens is the
+# one secret with no recovery path — lose control of it and every existing
+# customer's key becomes unrenewable. Encrypted-at-rest (.age) is not a reason
+# to relax: this repo is public, and an offline attack on a leaked file has no
+# deadline. Keep the real copy in a password manager, not the working tree.
+*.age
+*.pem
+.secrets/
+
+# Private planning docs. These live in the private serin-pro repo
+# (docs/planning/); this repo is public, so keep roadmap, competitive
+# analysis, vendor economics and launch runbooks out of it. Listing them
+# here means re-adding one takes a deliberate `git add -f`.
+docs/KANBAN.md
+docs/ANALYST-NOTES.md
+docs/BROKERAGE_INTEGRATION_PLAN.md
+docs/GO-LIVE.md
+docs/launch-readiness.md
+docs/LAUNCH-READINESS.md
+docs/PRD.md
+docs/PLAN.md
+docs/RESEARCH.md
+docs/TEAM.md
+docs/QA-PLAN.md
+docs/CLOUD-POSTGRES.md

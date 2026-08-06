@@ -1,0 +1,21 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 5174",
+    "app:local": "scripts/run-local.sh",
+    "dev:ios": "scripts/dev-ios.sh",
+    "start:local": "scripts/start-local.sh",
+    "stop:local": "scripts/stop-local.sh",
+    "test:backend": "pytest"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "qrcode": "^1.5.4",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "vite": "^6.3.5"
+  }
+}

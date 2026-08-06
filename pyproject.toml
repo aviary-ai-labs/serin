@@ -1,0 +1,29 @@
+[project]
+name = "serin"
+version = "0.9.0"
+description = "Open-source, self-hosted portfolio tracker with a connector platform and optional AI briefings."
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["backend", "tests"]
+exclude = ["frontend", "mobile", "data", ".venv"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes core; I: import order; B: bugbear footguns;
+# UP: modernize. Kept intentionally lean — the gate should catch bugs,
+# not bikeshed style.
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  "E501",  # line length is advisory; the formatter owns wrapping
+  "B008",  # FastAPI's Depends/Query in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Connector modules register via import side-effects.
+"backend/connectors/__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

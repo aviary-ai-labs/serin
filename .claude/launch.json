@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "serin",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "npx vite --host 127.0.0.1 --port \"$PORT\""],
+      "autoPort": true,
+      "port": 5175
+    }
+  ]
+}

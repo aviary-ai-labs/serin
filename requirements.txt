@@ -1,0 +1,16 @@
+fastapi==0.136.1
+uvicorn==0.30.0
+python-dotenv==1.2.2
+pydantic>=2.12.4,<3
+httpx==0.27.0
+python-multipart==0.0.27
+snaptrade-python-sdk>=11.0.0
+cryptography>=44
+# Only used when SERIN_DATABASE_URL points at Postgres (shared deployments).
+# Self-hosters run SQLite and never import it — but it has to be installed in
+# the image, because dbdriver imports it lazily and would otherwise fail on the
+# first request after deploy rather than at build time.
+psycopg[binary]>=3.2,<4
+# Renders SECURITY.md / docs/*.md as the site's /security, /privacy, /terms
+# and /deploy pages, so policy links don't hand visitors off to GitHub.
+markdown>=3.6
