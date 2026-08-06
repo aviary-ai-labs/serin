@@ -105,9 +105,12 @@ export function ConnectorsView({ addToast, onChanged }) {
   const load = useCallback(async () => {
     try {
       const data = await api('/api/connectors');
-      setCards(data.connectors || []);
+      const list = data.connectors || [];
+      setCards(list);
+      return list;
     } catch (error) {
       addToast?.('error', `Connectors: ${error.message}`);
+      return [];
     } finally {
       setLoaded(true);
     }
@@ -135,10 +138,30 @@ export function ConnectorsView({ addToast, onChanged }) {
     if (openId === card.manifest.id) { setOpenId(null); return; }
     const draft = {};
     card.manifest.config_schema.forEach(field => {
+      if (field.type === 'provider_list') {
+        draft[field.key] = normalizeProviderRows(card, field);
+        return;
+      }
       draft[field.key] = field.secret ? '' : (card.config?.[field.key] ?? field.default ?? '');
     });
     setDrafts(prev => ({ ...prev, [card.manifest.id]: draft }));
     setOpenId(card.manifest.id);
+  }
+
+  // The saved rows, or — for configs that predate the list — rows derived
+  // from whichever keys are already set, in the same order the backend's
+  // legacy fallback uses. What you see is what will run.
+  function normalizeProviderRows(card, field) {
+    const saved = card.config?.[field.key];
+    if (Array.isArray(saved) && saved.length) {
+      return saved.filter(r => r && r.id).map(r => ({ id: r.id, model: r.model || '', base_url: r.base_url || '' }));
+    }
+    const rows = [];
+    ['deepseek', 'anthropic'].forEach(id => {
+      const opt = (field.options || []).find(o => o.value === id);
+      if (opt && card.config?.[`${opt.key_field}__is_set`]) rows.push({ id, model: '', base_url: '' });
+    });
+    return rows;
   }
 
   function setField(id, key, value) {
@@ -152,9 +175,17 @@ export function ConnectorsView({ addToast, onChanged }) {
         method: 'POST',
         body: JSON.stringify({ enabled }),
       });
-      await load();
+      const fresh = await load();
       onChanged?.();
-      addToast?.('success', `${card.manifest.name} ${enabled ? 'enabled' : 'disabled'}.`);
+      const updated = fresh.find(c => c.manifest.id === card.manifest.id);
+      if (enabled && updated?.needs_setup) {
+        // On is a wish, configured is a fact — don't let the green toggle
+        // read as "all set". Open the form on the missing pieces.
+        addToast?.('error', `${card.manifest.name} is on, but not set up yet — finish the configuration below.`);
+        if (openId !== card.manifest.id) startEdit(updated);
+      } else {
+        addToast?.('success', `${card.manifest.name} ${enabled ? 'enabled' : 'disabled'}.`);
+      }
     } catch (error) {
       addToast?.('error', error.message);
     } finally {
@@ -515,8 +546,16 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
   // the deployment. Say so once, rather than disabling six fields silently.
   const operatorRun = hasConfig && !manifest.config_schema.some(f => fieldIsEditable(card, f));
   const anyEditable = hasConfig && !operatorRun;
-  const statusTone = enabled ? (configured ? 'on' : 'pending') : 'off';
-  const statusLabel = enabled ? (configured ? 'Active' : 'On (defaults)') : 'Off';
+  // needs_setup outranks everything: an enabled connector that can't work is
+  // the state most worth being loud about.
+  const statusTone = enabled ? (card.needs_setup ? 'warn' : 'on') : 'off';
+  const statusLabel = enabled ? (card.needs_setup ? 'Needs setup' : (configured ? 'Active' : 'On (defaults)')) : 'Off';
+  const providerListField = manifest.config_schema.find(f => f.type === 'provider_list');
+  // Keys live inside their provider rows; the generic loop must not render
+  // them a second time below the list.
+  const providerKeyFields = new Set(
+    (providerListField?.options || []).map(o => o.key_field).filter(Boolean)
+  );
 
   return (
     <div className={`connector-card ${enabled ? 'is-on' : ''}`}>
@@ -572,6 +611,11 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
               <a className="connector-doclink" href={manifest.docs_url} target="_blank" rel="noreferrer">Site ↗</a>
             )}
           </div>
+          {enabled && card.needs_setup && (
+            <div className="connector-needs-setup">
+              Enabled, but it can&apos;t run yet — open Configure and finish the setup.
+            </div>
+          )}
           {test && (
             <div className={`connector-test ${test.ok ? 'ok' : 'err'}`}>
               {test.ok ? '✓ ' : '✕ '}{test.message}
@@ -588,16 +632,33 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
               nothing to fill in.
             </p>
           )}
-          {manifest.config_schema.map(field => (
-            <ConfigInput
-              key={field.key}
-              field={field}
-              value={draft?.[field.key] ?? ''}
-              isSet={field.secret ? config?.[`${field.key}__is_set`] : false}
-              editable={fieldIsEditable(card, field)}
-              onChange={value => onSetField(id, field.key, value)}
-            />
-          ))}
+          {manifest.config_schema.map(field => {
+            if (providerKeyFields.has(field.key)) return null;
+            if (field.type === 'provider_list') {
+              return (
+                <ProviderListEditor
+                  key={field.key}
+                  field={field}
+                  rows={Array.isArray(draft?.[field.key]) ? draft[field.key] : []}
+                  draft={draft || {}}
+                  config={config || {}}
+                  editable={fieldIsEditable(card, field)}
+                  onRows={rows => onSetField(id, field.key, rows)}
+                  onKey={(keyField, value) => onSetField(id, keyField, value)}
+                />
+              );
+            }
+            return (
+              <ConfigInput
+                key={field.key}
+                field={field}
+                value={draft?.[field.key] ?? ''}
+                isSet={field.secret ? config?.[`${field.key}__is_set`] : false}
+                editable={fieldIsEditable(card, field)}
+                onChange={value => onSetField(id, field.key, value)}
+              />
+            );
+          })}
           {anyEditable && (
             <div className="connector-config-actions">
               <button className="btn btn-primary btn-sm" disabled={busy === `save-${id}`} onClick={() => onSave(card)}>
@@ -607,6 +668,115 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function ProviderListEditor({ field, rows, draft, config, editable, onRows, onKey }) {
+  const [dragIndex, setDragIndex] = React.useState(null);
+  const options = field.options || [];
+  const used = new Set(rows.map(r => r.id));
+  const available = options.filter(o => !used.has(o.value));
+
+  function optionFor(id) {
+    return options.find(o => o.value === id) || { label: id, needs_key: true };
+  }
+
+  function move(from, to) {
+    if (to < 0 || to >= rows.length || from === to) return;
+    const next = rows.slice();
+    const [row] = next.splice(from, 1);
+    next.splice(to, 0, row);
+    onRows(next);
+  }
+
+  return (
+    <div className="config-field provider-list">
+      <span className="config-field-label">{field.label}</span>
+      {rows.length === 0 && (
+        <p className="provider-empty">No AI providers yet — add one below to power briefings and Smart Import.</p>
+      )}
+      {rows.map((row, index) => {
+        const opt = optionFor(row.id);
+        const keySet = opt.key_field ? config[`${opt.key_field}__is_set`] : false;
+        return (
+          <div
+            key={row.id}
+            className={`provider-row ${dragIndex === index ? 'dragging' : ''}`}
+            draggable={editable}
+            onDragStart={() => setDragIndex(index)}
+            onDragEnd={() => setDragIndex(null)}
+            onDragOver={e => e.preventDefault()}
+            onDrop={() => { if (dragIndex !== null) move(dragIndex, index); setDragIndex(null); }}
+          >
+            <span className="provider-grip" title="Drag to reorder" aria-hidden="true">⠿</span>
+            <span className="provider-rank num">{index + 1}</span>
+            <div className="provider-row-body">
+              <div className="provider-row-head">
+                <b>{opt.label}</b>
+                {opt.vision && <span className="provider-tag">images</span>}
+                {index === 0 && <span className="provider-tag first">tried first</span>}
+              </div>
+              <div className="provider-row-inputs">
+                {opt.needs_key && (
+                  <input
+                    type="password"
+                    disabled={!editable}
+                    value={draft[opt.key_field] ?? ''}
+                    placeholder={keySet ? '•••••••• (set — leave blank to keep)' : 'API key'}
+                    aria-label={`${opt.label} API key`}
+                    onChange={e => onKey(opt.key_field, e.target.value)}
+                  />
+                )}
+                {row.id === 'ollama' && (
+                  <input
+                    type="text"
+                    disabled={!editable}
+                    value={row.base_url ?? ''}
+                    placeholder={opt.base_url || 'http://localhost:11434/v1'}
+                    aria-label="Ollama URL"
+                    onChange={e => onRows(rows.map((r, i) => (i === index ? { ...r, base_url: e.target.value } : r)))}
+                  />
+                )}
+                <input
+                  type="text"
+                  className="provider-model"
+                  disabled={!editable}
+                  value={row.model ?? ''}
+                  placeholder={opt.default_model ? `${opt.default_model} (default)` : 'model'}
+                  aria-label={`${opt.label} model`}
+                  onChange={e => onRows(rows.map((r, i) => (i === index ? { ...r, model: e.target.value } : r)))}
+                />
+              </div>
+              {opt.help && <span className="config-field-help">{opt.help}</span>}
+            </div>
+            {editable && (
+              <button
+                type="button"
+                className="provider-remove"
+                aria-label={`Remove ${opt.label}`}
+                onClick={() => onRows(rows.filter((_, i) => i !== index))}
+              >×</button>
+            )}
+          </div>
+        );
+      })}
+      {editable && available.length > 0 && (
+        <div className="provider-add">
+          <select
+            value=""
+            aria-label="Add AI provider"
+            onChange={e => {
+              const id = e.target.value;
+              if (id) onRows([...rows, { id, model: '', base_url: '' }]);
+            }}
+          >
+            <option value="">+ Add AI provider…</option>
+            {available.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      )}
+      {field.help && <span className="config-field-help">{field.help}</span>}
     </div>
   );
 }

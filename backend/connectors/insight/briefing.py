@@ -2,11 +2,12 @@
 
 The briefing is no longer core: it's a connector you toggle on. When enabled,
 the Briefings tab and scheduler are active; when off, Serin is a pure tracker.
-Provider/model/style chosen here drive the briefing run.
+Providers/models/style chosen here drive the briefing run (and Smart Import).
 """
 
 from __future__ import annotations
 
+from backend import ai_catalog
 from backend.config import get_ai_status
 from backend.connectors.base import (
     ConfigField,
@@ -15,6 +16,27 @@ from backend.connectors.base import (
     TestResult,
 )
 from backend.connectors.registry import register
+
+
+def _provider_key_fields() -> list[ConfigField]:
+    """One secret field per catalog provider that authenticates with a key.
+
+    Flat fields rather than keys inside the providers list, deliberately: the
+    registry's secret machinery (encrypt at rest, mask on read, blank-means-
+    keep on save) works per field, and a JSON blob would opt out of all of it.
+    The portal renders each inside its provider row.
+    """
+    return [
+        ConfigField(
+            key=spec.key_field,
+            label=f"{spec.label} API key",
+            type="password",
+            secret=True,
+            help=spec.help,
+        )
+        for spec in ai_catalog.CATALOG
+        if spec.needs_key
+    ]
 
 
 @register
@@ -28,32 +50,13 @@ class BriefingConnector(InsightConnector):
         default_enabled=False,  # opt-in
         config_schema=[
             ConfigField(
-                key="provider",
-                label="AI provider",
-                type="select",
-                default="auto",
-                options=[
-                    {"value": "auto", "label": "Auto (prefer Anthropic, then DeepSeek)"},
-                    {"value": "anthropic_api", "label": "Anthropic API"},
-                    {"value": "deepseek", "label": "DeepSeek API"},
-                    {"value": "claude_cli", "label": "Claude CLI (local dev)"},
-                ],
-                help="Which model backend generates the briefing.",
+                key="providers",
+                label="AI providers",
+                type="provider_list",
+                options=ai_catalog.as_options(),
+                help="Tried top to bottom — drag to reorder. Each provider keeps its own key and model.",
             ),
-            ConfigField(
-                key="anthropic_api_key",
-                label="Anthropic API key",
-                type="password",
-                secret=True,
-                help="Used when provider is Anthropic or Auto.",
-            ),
-            ConfigField(
-                key="deepseek_api_key",
-                label="DeepSeek API key",
-                type="password",
-                secret=True,
-                help="Used when provider is DeepSeek. ~1/20th the cost of Claude Sonnet.",
-            ),
+            *_provider_key_fields(),
             ConfigField(
                 key="style",
                 owner="user",
@@ -68,6 +71,17 @@ class BriefingConnector(InsightConnector):
             ),
         ],
     )
+
+    @classmethod
+    def ready(cls) -> bool:
+        """Ready means the waterfall has at least one usable provider —
+        portal keys and deployment env vars both count."""
+        from backend import ai_provider
+
+        try:
+            return bool(ai_provider.provider_chain())
+        except Exception:
+            return True
 
     def test(self) -> TestResult:
         status = get_ai_status(force=True)

@@ -130,3 +130,24 @@ def test_connector_api_v1_alias(tmp_path):
     _fresh_db(tmp_path)
     client = TestClient(main.app)
     assert client.get("/api/v1/connectors").status_code == 200
+
+
+# --- needs_setup: an enabled connector that cannot work says so -------------
+
+def test_enabled_briefing_without_providers_needs_setup(tmp_path, monkeypatch):
+    _fresh_db(tmp_path)
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    monkeypatch.setattr(settings, "deepseek_api_key", "")
+    monkeypatch.setattr("backend.config.shutil.which", lambda name: None)
+    for env in ("OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    registry.set_enabled("ai_briefing", True)
+
+    client = TestClient(main.app)
+    cards = {c["manifest"]["id"]: c for c in client.get("/api/connectors").json()["connectors"]}
+    assert cards["ai_briefing"]["needs_setup"] is True
+
+    # A key arriving (portal or env — env here) makes the same card ready.
+    monkeypatch.setattr(settings, "deepseek_api_key", "dsk")
+    cards = {c["manifest"]["id"]: c for c in client.get("/api/connectors").json()["connectors"]}
+    assert cards["ai_briefing"]["needs_setup"] is False

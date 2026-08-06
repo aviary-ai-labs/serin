@@ -821,6 +821,9 @@ def _connector_card(manifest) -> dict:
         "enabled": connector_registry.is_enabled(manifest.id),
         "config": connector_registry.public_config(manifest.id),
         "configured": connector_registry.has_setting(manifest.id),
+        # Enabled is a wish; ready is a fact. The portal warns when they
+        # disagree, because a green toggle over missing config reads as done.
+        "needs_setup": connector_registry.is_enabled(manifest.id) and not cls.ready(),
         "supports_sync": bool(getattr(cls, "supports_sync", False)),
         # Whether *deployment-owned* fields may be edited here. Strictly about
         # the deployment, never about this card: a connector can mix the two
@@ -1060,6 +1063,7 @@ async def _api_import_extract(
     """
     image_bytes: bytes | None = None
     image_mime: str | None = None
+    pdf_bytes: bytes | None = None
     extracted_text: str | None = text
 
     if file is not None:
@@ -1069,16 +1073,17 @@ async def _api_import_extract(
         if mime in _IMAGE_MIME_TYPES or filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
             image_bytes = content
             image_mime = mime if mime in _IMAGE_MIME_TYPES else f"image/{filename.rsplit('.', 1)[-1]}"
+        elif mime == "application/pdf" or filename.endswith(".pdf"):
+            # Rasterized locally page by page — see smart_import._pdf_page_images.
+            pdf_bytes = content
         else:
-            # CSV / text / TSV / PDF-as-text — pass through as text.
+            # CSV / text / TSV — pass through as text.
             try:
                 extracted_text = content.decode("utf-8", errors="replace")
             except Exception as exc:
-                raise HTTPException(
-                    400, "Could not decode file as text. PDF support is limited — paste contents instead."
-                ) from exc
+                raise HTTPException(400, "Could not decode file as text.") from exc
 
-    if not extracted_text and image_bytes is None:
+    if not extracted_text and image_bytes is None and pdf_bytes is None:
         raise HTTPException(400, "Provide a file or paste text to extract from.")
 
     try:
@@ -1086,6 +1091,7 @@ async def _api_import_extract(
             text=extracted_text,
             image_bytes=image_bytes,
             image_mime=image_mime,
+            pdf_bytes=pdf_bytes,
             hint=hint,
         )
     except RuntimeError as exc:

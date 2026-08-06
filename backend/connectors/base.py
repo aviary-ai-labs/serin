@@ -24,7 +24,10 @@ from typing import Any, Literal
 
 ConnectorKind = Literal["market_data", "holdings", "insight"]
 FieldType = Literal[
-    "text", "password", "url", "number", "select", "textarea", "boolean", "mapping"
+    "text", "password", "url", "number", "select", "textarea", "boolean", "mapping",
+    # An ordered list of AI providers (the waterfall). Rendered as add/remove/
+    # drag-to-reorder rows; options carry the provider catalog.
+    "provider_list",
 ]
 
 
@@ -137,6 +140,25 @@ class Connector:
     # Every connector can be health-checked. Default: trivially OK.
     def test(self) -> TestResult:
         return TestResult(ok=True, message="No connection test for this connector.")
+
+    # Whether the connector, as configured right now, can actually do its job.
+    # An enabled toggle is not the same claim — the portal shows "Needs setup"
+    # for enabled-but-not-ready, because a green switch over an empty key
+    # field reads as "all done" and quietly isn't. Default: every required
+    # field has a value (or a default). Override for richer notions of ready.
+    @classmethod
+    def ready(cls) -> bool:
+        from backend.connectors import registry
+
+        try:
+            cfg = registry.get_config(cls.manifest.id) or {}
+        except Exception:
+            return True  # can't tell — don't alarm anyone over a read hiccup
+        return all(
+            (cfg.get(f.key) not in (None, "")) or (f.default not in (None, ""))
+            for f in cls.manifest.config_schema
+            if f.required
+        )
 
 
 class MarketDataConnector(Connector):

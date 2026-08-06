@@ -1,7 +1,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { api } from '../api.js';
 
-const ACCEPTED = '.csv,.tsv,.txt,image/png,image/jpeg,image/webp,image/gif';
+const ACCEPTED = '.csv,.tsv,.txt,.pdf,application/pdf,image/png,image/jpeg,image/webp,image/gif';
 const ASSET_TYPES = ['stock', 'etf', 'crypto', 'cash', 'option'];
 const COMMON_BROKERS = [
   'robinhood', 'etrade', 'fidelity', 'schwab', 'vanguard',
@@ -189,10 +189,10 @@ export function SmartImport({ onClose, onImported, addToast, brokers = [] }) {
         {stage === 'intake' && (
           <div className="smart-import-intake">
             <p className="smart-import-blurb">
-              Drop one or more CSVs or screenshots of your positions — add several
-              at once. AI extracts the rows; you review and confirm before
-              anything is saved. Prefer to type them in? Use <strong>Enter
-              manually</strong>.
+              Drop one or more CSVs, screenshots, or PDF statements of your
+              positions — add several at once. AI extracts the rows; you review
+              and confirm before anything is saved. Prefer to type them in? Use{' '}
+              <strong>Enter manually</strong>.
             </p>
 
             <div
@@ -211,7 +211,7 @@ export function SmartImport({ onClose, onImported, addToast, brokers = [] }) {
                 onChange={event => { addFiles(event.target.files); event.target.value = ''; }}
               />
               <strong>{files.length ? 'Drop more, or click to add' : 'Drop files here, or click to browse'}</strong>
-              <span className="smart-dropzone-meta">CSV · TSV · TXT · PNG · JPG · WEBP · multiple allowed</span>
+              <span className="smart-dropzone-meta">CSV · TSV · TXT · PDF · PNG · JPG · WEBP · multiple allowed</span>
             </div>
 
             {files.length > 0 && (

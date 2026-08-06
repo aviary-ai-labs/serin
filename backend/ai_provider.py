@@ -10,6 +10,10 @@ here so a key saved in the UI works everywhere, not just in some code paths.
 
 from __future__ import annotations
 
+import json
+import os
+
+from backend import ai_catalog
 from backend.config import settings
 from backend.connectors import registry as connector_registry
 
@@ -82,36 +86,122 @@ def deepseek_available() -> bool:
     return bool(resolved_deepseek_key())
 
 
-def resolved_provider() -> str:
-    """Which provider an AI call should use.
+def _entry_key(cfg: dict, spec: ai_catalog.ProviderSpec) -> str:
+    """The API key for one provider: portal value first, then deployment env.
 
-    Precedence: explicit portal choice → explicit ``SERIN_AI_PROVIDER`` →
-    auto (DeepSeek, then Anthropic, then Claude CLI). Availability checks are
-    portal-aware, unlike ``settings.resolved_ai_provider`` which only sees
-    environment variables.
-
-    Auto prefers DeepSeek on measured cost: benchmarked against the real
-    briefing prompt, deepseek-v4-flash produced a briefing for roughly a
-    fortieth of what claude-sonnet-4-6 charged, in a third of the time, and was
-    the only model in the field to do the arithmetic on a planted
-    sector-total inconsistency. Anyone who prefers otherwise still wins the
-    tie — a portal choice and SERIN_AI_PROVIDER both outrank this, and auto
-    only decides when someone has configured both and expressed no preference.
+    Anthropic and DeepSeek go through settings rather than os.environ so the
+    existing configuration surface (and every test that monkeypatches it)
+    keeps working.
     """
-    cfg = _portal_config()
+    if not spec.needs_key:
+        return ""
+    val = (cfg.get(spec.key_field) or "").strip()
+    if val:
+        return val
+    if spec.id == "anthropic":
+        return settings.anthropic_api_key.strip()
+    if spec.id == "deepseek":
+        return settings.deepseek_api_key.strip()
+    return os.environ.get(spec.env_var, "").strip() if spec.env_var else ""
+
+
+def _default_model(spec: ai_catalog.ProviderSpec) -> str:
+    if spec.id == "anthropic":
+        return settings.anthropic_model.strip() or spec.default_model
+    if spec.id == "deepseek":
+        return settings.deepseek_model.strip() or spec.default_model
+    return spec.default_model
+
+
+def _resolve_entry(cfg: dict, raw: dict) -> dict | None:
+    """One chain row → a callable provider, or None if it can't work."""
+    spec = ai_catalog.get(str(raw.get("id") or "").strip().lower())
+    if spec is None:
+        return None
+    if spec.kind == "claude_cli":
+        if not settings.claude_cli_configured:
+            return None
+        key = ""
+    else:
+        key = _entry_key(cfg, spec)
+        if spec.needs_key and not key:
+            return None
+    base_url = (raw.get("base_url") or "").strip() or spec.base_url
+    if spec.id == "deepseek" and not (raw.get("base_url") or "").strip():
+        base_url = settings.deepseek_base_url.rstrip("/") or spec.base_url
+    explicit_model = (raw.get("model") or "").strip()
+    return {
+        "id": spec.id,
+        "kind": spec.kind,
+        "label": spec.label,
+        "key": key,
+        "model": explicit_model or _default_model(spec),
+        # Whether the user chose the model or inherited the default — Smart
+        # Import downgrades defaulted models to a cheap one, but never
+        # overrides an explicit choice.
+        "model_explicit": bool(explicit_model),
+        "base_url": base_url,
+        "vision": spec.vision,
+    }
+
+
+def _legacy_entries(cfg: dict) -> list[dict]:
+    """The pre-list configuration, expressed as a chain.
+
+    Explicit portal choice → that one provider; explicit SERIN_AI_PROVIDER →
+    same; auto → DeepSeek, then Anthropic, then the Claude CLI. Auto prefers
+    DeepSeek on measured cost: benchmarked against the real briefing prompt it
+    produced a briefing for roughly a fortieth of what claude-sonnet-4-6
+    charged, in a third of the time.
+    """
     requested = str(cfg.get("provider") or "").strip().lower()
     if requested in ("", "auto"):
         requested = settings.ai_provider.strip().lower()
-    if requested == "claude_cli":
-        return "claude_cli" if settings.claude_cli_configured else "none"
-    if requested == "anthropic_api":
-        return "anthropic_api" if anthropic_available() else "none"
-    if requested == "deepseek":
-        return "deepseek" if deepseek_available() else "none"
-    if deepseek_available():
-        return "deepseek"
-    if anthropic_available():
-        return "anthropic_api"
-    if settings.claude_cli_configured:
-        return "claude_cli"
-    return "none"
+    if requested not in ("", "auto"):
+        return [{"id": requested}]
+    return [{"id": "deepseek"}, {"id": "anthropic"}, {"id": "claude_cli"}]
+
+
+def provider_chain() -> list[dict]:
+    """The ordered, usable AI providers — the waterfall.
+
+    Each entry: {id, kind, label, key, model, base_url, vision}. Order comes
+    from the portal's provider list (drag to reorder); a provider missing its
+    key simply drops out rather than failing the chain. Configs written
+    before the list existed resolve through the legacy fields, so nothing
+    breaks on upgrade.
+    """
+    cfg = _portal_config()
+    raw = cfg.get("providers")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if not isinstance(raw, list) or not raw:
+        raw = _legacy_entries(cfg)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        entry = _resolve_entry(cfg, row)
+        if entry and entry["id"] not in seen:
+            seen.add(entry["id"])
+            out.append(entry)
+    return out
+
+
+def vision_chain() -> list[dict]:
+    """The waterfall, restricted to providers that can read images."""
+    return [e for e in provider_chain() if e["vision"]]
+
+
+def resolved_provider() -> str:
+    """Head of the chain, in the vocabulary the status surfaces have always
+    used ("anthropic_api" | "deepseek" | "claude_cli" | ... | "none")."""
+    chain = provider_chain()
+    if not chain:
+        return "none"
+    head = chain[0]["id"]
+    return "anthropic_api" if head == "anthropic" else head

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ from backend.ai_provider import (
 )
 from backend.config import settings
 from backend.news import fetch_news
+
+logger = logging.getLogger(__name__)
 
 RECENT_TRANSACTION_DAYS = 7
 RECENT_TRANSACTION_LIMIT = 25
@@ -229,10 +232,11 @@ def estimate_briefing_cost() -> dict[str, Any]:
     to list-price math on a typical run. Surfaced next to the Run button so a
     provider change (e.g. Auto upgrading to Sonnet) is never a silent 20×.
     """
+    chain = ai_provider.provider_chain()
+    if not chain:
+        return {"provider": "none", "model": "", "estimated_cost_usd": None, "basis": "no provider configured"}
     provider = resolved_provider()
-    model = settings.deepseek_model if provider == "deepseek" else settings.anthropic_model
-    if provider == "none":
-        return {"provider": provider, "model": "", "estimated_cost_usd": None, "basis": "no provider configured"}
+    model = chain[0]["model"]
 
     recent = [
         b for b in db.list_briefings(limit=30)
@@ -329,19 +333,35 @@ DEEPSEEK_MAX_TOKENS = 10000
 
 
 async def call_model(prompt: str) -> tuple[str, dict[str, Any]]:
-    # Portal-aware: a provider/key saved in the AI-briefing connector config
-    # works here, not just env vars (see backend/ai_provider.py).
-    provider = resolved_provider()
-    if provider == "claude_cli":
-        return await call_claude_cli(prompt)
-    if provider == "anthropic_api":
-        return await call_anthropic_api(prompt)
-    if provider == "deepseek":
-        return await call_deepseek(prompt)
-    raise RuntimeError(
-        "No AI provider configured. Add an API key in the AI briefing "
-        "connector (Connectors tab), or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY."
-    )
+    """Run the prompt through the provider waterfall.
+
+    The chain's order is the user's (drag-to-reorder in the connector
+    portal); each provider that fails is logged and the next one tries, so a
+    provider outage degrades to the second choice instead of a dead briefing.
+    Only the last failure raises.
+    """
+    chain = ai_provider.provider_chain()
+    if not chain:
+        raise RuntimeError(
+            "No AI provider configured. Add one in the AI briefing "
+            "connector (Connectors tab), or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY."
+        )
+    last_error: Exception | None = None
+    for entry in chain:
+        try:
+            if entry["kind"] == "claude_cli":
+                return await call_claude_cli(prompt)
+            if entry["kind"] == "anthropic":
+                return await call_anthropic_api(prompt, model=entry["model"])
+            return await call_openai_compat(entry, prompt)
+        except Exception as exc:
+            last_error = exc
+            if entry is not chain[-1]:
+                logger.warning(
+                    "AI provider %s failed (%s) — trying %s next",
+                    entry["id"], exc, chain[chain.index(entry) + 1]["id"],
+                )
+    raise last_error if last_error else RuntimeError("No AI provider produced a briefing.")
 
 
 def _extract_openai_message_text(message: dict[str, Any]) -> str:
@@ -390,22 +410,22 @@ def parse_openai_chat_response(data: dict[str, Any], model: str, provider: str) 
     return text, usage
 
 
-async def call_deepseek(prompt: str) -> tuple[str, dict[str, Any]]:
-    if not deepseek_available():
-        raise RuntimeError(
-            "DeepSeek API key is not configured — add it in the AI briefing "
-            "connector or set DEEPSEEK_API_KEY."
-        )
+async def call_openai_compat(entry: dict[str, Any], prompt: str) -> tuple[str, dict[str, Any]]:
+    """One chat-completions call against any OpenAI-dialect provider.
 
+    ``entry`` is a resolved chain row from ``ai_provider.provider_chain()`` —
+    OpenAI, DeepSeek, Gemini, xAI, OpenRouter and Ollama all speak this
+    dialect; only the base URL, key and model differ.
+    """
     body: dict[str, Any] = {
-        "model": settings.deepseek_model,
+        "model": entry["model"],
         "max_tokens": DEEPSEEK_MAX_TOKENS,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
     }
-    if settings.deepseek_model.startswith("deepseek-v4"):
+    if entry["id"] == "deepseek" and entry["model"].startswith("deepseek-v4"):
         # v4 reasons unless told not to, and reasoning counts against
         # max_tokens. Measured on the real briefing prompt: with thinking left
         # on, flash spent an entire 4000-token budget deliberating and returned
@@ -414,20 +434,37 @@ async def call_deepseek(prompt: str) -> tuple[str, dict[str, Any]]:
         # been handed is not what deliberation is for.
         body["thinking"] = {"type": "disabled"}
 
+    headers = {"content-type": "application/json"}
+    if entry["key"]:
+        headers["Authorization"] = f"Bearer {entry['key']}"
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(
-            f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {resolved_deepseek_key()}",
-                "content-type": "application/json",
-            },
+            f"{entry['base_url'].rstrip('/')}/chat/completions",
+            headers=headers,
             json=body,
         )
     if response.status_code >= 400:
         detail = response.text[:500]
-        raise RuntimeError(f"DeepSeek API returned {response.status_code}: {detail}")
+        raise RuntimeError(f"{entry['label']} API returned {response.status_code}: {detail}")
 
-    return parse_openai_chat_response(response.json(), settings.deepseek_model, "deepseek")
+    return parse_openai_chat_response(response.json(), entry["model"], entry["id"])
+
+
+async def call_deepseek(prompt: str) -> tuple[str, dict[str, Any]]:
+    """Kept for callers that predate the chain; DeepSeek via the generic path."""
+    if not deepseek_available():
+        raise RuntimeError(
+            "DeepSeek API key is not configured — add it in the AI briefing "
+            "connector or set DEEPSEEK_API_KEY."
+        )
+    entry = {
+        "id": "deepseek",
+        "label": "DeepSeek",
+        "key": resolved_deepseek_key(),
+        "model": settings.deepseek_model,
+        "base_url": settings.deepseek_base_url,
+    }
+    return await call_openai_compat(entry, prompt)
 
 
 async def call_claude_cli(prompt: str) -> tuple[str, dict[str, Any]]:
@@ -464,7 +501,7 @@ async def call_claude_cli(prompt: str) -> tuple[str, dict[str, Any]]:
     return text, {"provider": "claude_cli"}
 
 
-async def call_anthropic_api(prompt: str) -> tuple[str, dict[str, Any]]:
+async def call_anthropic_api(prompt: str, model: str = "") -> tuple[str, dict[str, Any]]:
     if not anthropic_available():
         raise RuntimeError(
             "Anthropic API key is not configured — add it in the AI briefing "
@@ -472,7 +509,7 @@ async def call_anthropic_api(prompt: str) -> tuple[str, dict[str, Any]]:
         )
 
     body = {
-        "model": settings.anthropic_model,
+        "model": model or settings.anthropic_model,
         # Room for a briefing *and* whatever the model thinks first. On models
         # from Sonnet 5 onward, omitting `thinking` runs adaptive thinking, and
         # max_tokens caps thinking plus response text together — so a budget

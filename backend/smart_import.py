@@ -29,24 +29,11 @@ from __future__ import annotations
 import base64
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from backend import ai_provider, db
-from backend.ai_provider import (
-    anthropic_available as _anthropic_available,
-)
-from backend.ai_provider import (
-    deepseek_available as _deepseek_available,
-)
-from backend.ai_provider import (
-    resolved_deepseek_key as _resolved_deepseek_key,
-)
-from backend.ai_provider import (
-    resolved_provider as _resolved_provider,
-)
 from backend.config import settings
 
 # --- Pricing reference (mirrors briefings.MODEL_PRICING_PER_MTOK) -----------
@@ -91,62 +78,51 @@ SYSTEM_PROMPT = (
 # --- Provider routing --------------------------------------------------------
 
 
-@dataclass
-class _Provider:
-    name: str   # "deepseek" | "anthropic_api"
-    model: str
-    supports_vision: bool
+# Extraction is a transcription job — the answer is already in front of the
+# model — so when the user hasn't chosen a model explicitly, downgrade the
+# provider's briefing default to a cheap one. An explicit choice always wins.
+_IMPORT_MODEL_DEFAULTS = {
+    "anthropic": "claude-haiku-4-5",
+}
 
 
-def _select_provider(has_image: bool) -> _Provider:
-    """Pick the right provider/model for the input type.
+def _select_entry(has_image: bool) -> dict[str, Any]:
+    """Pick the first usable provider from the waterfall for this input type.
 
-    Image inputs always go to Anthropic — DeepSeek's hosted ``/chat/completions``
-    endpoint rejects the OpenAI-style ``image_url`` content block with a 400
-    ("unknown variant `image_url`, expected `text`"), regardless of the
-    requested model. The third-party guides claiming DeepSeek vision API
-    support describe their open-weights model (self-hosted), not the public
-    cloud API. Confirmed empirically 2026-06-30.
-
-    Text inputs honour the configured Serin AI provider for cost savings.
+    Image inputs need a vision-capable provider (DeepSeek's hosted API rejects
+    ``image_url`` blocks with a 400 — confirmed empirically 2026-06-30; the
+    Claude CLI path has no image plumbing either). Text goes to the head of
+    the chain.
     """
-    configured = _resolved_provider()  # portal-aware: "deepseek" | "anthropic_api" | ...
-
-    if has_image:
-        if _anthropic_available():
-            return _Provider("anthropic_api", "claude-haiku-4-5", True)
+    chain = ai_provider.vision_chain() if has_image else ai_provider.provider_chain()
+    chain = [e for e in chain if e["kind"] != "claude_cli"] if has_image else chain
+    if not chain:
+        if has_image and ai_provider.provider_chain():
+            raise RuntimeError(
+                "None of your configured AI providers accepts image input. "
+                "Add Anthropic, OpenAI, Gemini or Grok in the AI briefing "
+                "connector (Connectors tab), or paste the content as text."
+            )
         raise RuntimeError(
-            "Image extraction needs an Anthropic API key — DeepSeek's hosted "
-            "API doesn't accept image input. Add your Anthropic API key to "
-            "the AI briefing connector (Connectors tab → AI daily briefing → "
-            "Configure), or paste the content as text instead."
+            "Smart import needs an AI provider configured. Add one in the "
+            "AI briefing connector (Connectors tab → AI daily briefing → "
+            "Configure)."
         )
-
-    # Text path — use the cheap default when possible.
-    if configured == "deepseek" and _deepseek_available():
-        return _Provider("deepseek", "deepseek-v4-flash", False)
-    if configured == "anthropic_api" and _anthropic_available():
-        return _Provider("anthropic_api", "claude-haiku-4-5", False)
-    if _deepseek_available():
-        return _Provider("deepseek", "deepseek-v4-flash", False)
-    if _anthropic_available():
-        return _Provider("anthropic_api", "claude-haiku-4-5", False)
-    raise RuntimeError(
-        "Smart import needs an AI provider configured. Add a DeepSeek or "
-        "Anthropic API key to the AI briefing connector (Connectors tab → "
-        "AI daily briefing → Configure)."
-    )
+    entry = dict(chain[0])
+    if not entry.get("model_explicit") and entry["id"] in _IMPORT_MODEL_DEFAULTS:
+        entry["model"] = _IMPORT_MODEL_DEFAULTS[entry["id"]]
+    return entry
 
 
 # --- Provider call paths -----------------------------------------------------
 
 
-async def _call_deepseek(
-    provider: _Provider,
+async def _call_openai_compat(
+    entry: dict[str, Any],
     user_content: list[dict[str, Any]],
 ) -> tuple[str, dict[str, Any]]:
     body: dict[str, Any] = {
-        "model": provider.model,
+        "model": entry["model"],
         "max_tokens": 4000,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -154,25 +130,25 @@ async def _call_deepseek(
         ],
         "response_format": {"type": "json_object"},
     }
-    if provider.model.startswith("deepseek-v4"):
+    if entry["id"] == "deepseek" and entry["model"].startswith("deepseek-v4"):
         # v4 reasons unless told not to, and reasoning counts against
         # max_tokens — measured burning a whole 4000-token budget without
         # emitting a character. Extraction is a transcription job with the
         # answer already in front of it, so the deliberation buys nothing and
         # costs the entire response.
         body["thinking"] = {"type": "disabled"}
+    headers = {"content-type": "application/json"}
+    if entry["key"]:
+        headers["Authorization"] = f"Bearer {entry['key']}"
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(
-            f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {_resolved_deepseek_key()}",
-                "content-type": "application/json",
-            },
+            f"{entry['base_url'].rstrip('/')}/chat/completions",
+            headers=headers,
             json=body,
         )
     if response.status_code >= 400:
         raise RuntimeError(
-            f"DeepSeek returned {response.status_code}: {response.text[:400]}"
+            f"{entry['label']} returned {response.status_code}: {response.text[:400]}"
         )
     data = response.json()
     choices = data.get("choices") or [{}]
@@ -181,17 +157,17 @@ async def _call_deepseek(
     return text, {
         "input_tokens": usage.get("prompt_tokens") or 0,
         "output_tokens": usage.get("completion_tokens") or 0,
-        "model": provider.model,
-        "provider": "deepseek",
+        "model": entry["model"],
+        "provider": entry["id"],
     }
 
 
 async def _call_anthropic(
-    provider: _Provider,
+    entry: dict[str, Any],
     user_content: list[dict[str, Any]],
 ) -> tuple[str, dict[str, Any]]:
     body = {
-        "model": provider.model,
+        "model": entry["model"],
         "max_tokens": 4000,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_content}],
@@ -217,7 +193,7 @@ async def _call_anthropic(
     return text, {
         "input_tokens": usage.get("input_tokens") or 0,
         "output_tokens": usage.get("output_tokens") or 0,
-        "model": provider.model,
+        "model": entry["model"],
         "provider": "anthropic_api",
     }
 
@@ -233,34 +209,76 @@ def _build_text_content(text: str, hint: str | None) -> list[dict[str, Any]]:
 
 
 def _build_image_content(
-    image_bytes: bytes, mime_type: str, provider: _Provider, hint: str | None
+    images: list[tuple[bytes, str]], entry: dict[str, Any], hint: str | None
 ) -> list[dict[str, Any]]:
-    b64 = base64.b64encode(image_bytes).decode("ascii")
+    plural = "images are" if len(images) > 1 else "image is"
     instructions = (
-        "The attached image is a screenshot or photo of portfolio positions "
-        "(broker app, statement, spreadsheet, etc.). Read it carefully and "
-        "extract every position. Return JSON only.\n"
+        f"The attached {plural} a screenshot, photo, or document pages of "
+        "portfolio positions (broker app, statement, spreadsheet, etc.). Read "
+        "them carefully and extract every position. Return JSON only.\n"
     )
     if hint:
         instructions += f"\nUser hint: {hint}\n"
 
-    if provider.name == "anthropic_api":
-        # Anthropic format: {"type": "image", "source": {"type": "base64", ...}}
-        return [
-            {"type": "text", "text": instructions},
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime_type, "data": b64},
-            },
-        ]
-    # OpenAI/DeepSeek format: {"type": "image_url", "image_url": {"url": "data:..."}}
-    return [
-        {"type": "text", "text": instructions},
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-        },
-    ]
+    content: list[dict[str, Any]] = [{"type": "text", "text": instructions}]
+    for image_bytes, mime_type in images:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        if entry["kind"] == "anthropic":
+            content.append(
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": mime_type, "data": b64},
+                }
+            )
+        else:
+            # OpenAI dialect: {"type": "image_url", "image_url": {"url": "data:..."}}
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+                }
+            )
+    return content
+
+
+MAX_PDF_PAGES = 5
+
+
+def _pdf_page_images(pdf_bytes: bytes) -> tuple[list[tuple[bytes, str]], int]:
+    """Rasterize a PDF's first pages to PNGs.
+
+    Local rendering, deliberately: it makes PDF import work with *any*
+    vision-capable provider instead of only the ones with native PDF input,
+    and nothing but pixels ever leaves the machine. Returns (images,
+    total_pages) so the caller can say when a statement was truncated.
+    """
+    import io
+
+    import pypdfium2 as pdfium
+
+    try:
+        doc = pdfium.PdfDocument(pdf_bytes)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not read that PDF — it may be corrupt or password-protected."
+        ) from exc
+    try:
+        total = len(doc)
+        images: list[tuple[bytes, str]] = []
+        for index in range(min(total, MAX_PDF_PAGES)):
+            page = doc[index]
+            pil_image = page.render(scale=2.0).to_pil()
+            buffer = io.BytesIO()
+            pil_image.save(buffer, format="PNG")
+            images.append((buffer.getvalue(), "image/png"))
+            page.close()
+        return images, total
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not render that PDF — it may be corrupt or password-protected."
+        ) from exc
+    finally:
+        doc.close()
 
 
 # --- Parsing + validation ----------------------------------------------------
@@ -362,13 +380,14 @@ def _cost_estimate(usage: dict[str, Any]) -> float:
     )
 
 
-def _privacy_notice(provider: _Provider) -> str:
-    label = {
-        "deepseek": "DeepSeek",
-        "anthropic_api": "Anthropic",
-    }.get(provider.name, provider.name)
+def _privacy_notice(entry: dict[str, Any]) -> str:
+    if entry["id"] == "ollama":
+        return (
+            f"This content is parsed by your local Ollama ({entry['model']}) — "
+            "nothing leaves this machine."
+        )
     return (
-        f"This content will be sent to {label} ({provider.model}) for parsing. "
+        f"This content will be sent to {entry['label']} ({entry['model']}) for parsing. "
         "Crop or redact anything sensitive (account numbers, names, addresses) first."
     )
 
@@ -381,30 +400,44 @@ async def extract(
     text: str | None = None,
     image_bytes: bytes | None = None,
     image_mime: str | None = None,
+    pdf_bytes: bytes | None = None,
     hint: str | None = None,
 ) -> dict[str, Any]:
     """Run extraction. Returns ``{rows, warnings, provider, model, cost_usd,
     notice, raw}``. No DB writes."""
-    if not text and not image_bytes:
-        raise RuntimeError("Provide either text or image content.")
-    has_image = image_bytes is not None
-    provider = _select_provider(has_image=has_image)
-
-    if has_image:
+    if not text and not image_bytes and not pdf_bytes:
+        raise RuntimeError("Provide text, an image, or a PDF to extract from.")
+    truncation_note = ""
+    images: list[tuple[bytes, str]] = []
+    if pdf_bytes is not None:
+        images, total_pages = _pdf_page_images(pdf_bytes)
+        if total_pages > MAX_PDF_PAGES:
+            truncation_note = (
+                f"Only the first {MAX_PDF_PAGES} of {total_pages} PDF pages were read."
+            )
+    elif image_bytes is not None:
         if not image_mime:
             raise RuntimeError("Image upload requires a mime type")
-        user_content = _build_image_content(image_bytes, image_mime, provider, hint)
+        images = [(image_bytes, image_mime)]
+
+    has_image = bool(images)
+    entry = _select_entry(has_image=has_image)
+
+    if has_image:
+        user_content = _build_image_content(images, entry, hint)
     else:
         user_content = _build_text_content(text or "", hint)
 
-    if provider.name == "deepseek":
-        raw_text, usage = await _call_deepseek(provider, user_content)
+    if entry["kind"] == "anthropic":
+        raw_text, usage = await _call_anthropic(entry, user_content)
     else:
-        raw_text, usage = await _call_anthropic(provider, user_content)
+        raw_text, usage = await _call_openai_compat(entry, user_content)
 
     parsed = _parse_response(raw_text)
     raw_rows = parsed.get("positions") or []
     notes = str(parsed.get("notes") or "").strip()
+    if truncation_note:
+        notes = f"{truncation_note} {notes}".strip()
 
     existing_keys: set[tuple[str, str, str]] = set()
     for position in db.list_positions():
@@ -422,10 +455,10 @@ async def extract(
         "rows": rows,
         "row_count": len(rows),
         "notes": notes,
-        "provider": provider.name,
-        "model": provider.model,
+        "provider": "anthropic_api" if entry["id"] == "anthropic" else entry["id"],
+        "model": entry["model"],
         "cost_usd": _cost_estimate(usage),
-        "notice": _privacy_notice(provider),
+        "notice": _privacy_notice(entry),
     }
 
 

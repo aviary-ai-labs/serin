@@ -1350,6 +1350,43 @@ a:hover { text-decoration: underline; }
 .connector-status.on, .statuspill.on { background: #e7f6ee; color: var(--up); }
 .connector-status.pending, .statuspill.pending { background: #eaf0fe; color: var(--acc); }
 .connector-status.off, .statuspill.off { background: var(--inset); color: var(--mut); }
+.connector-status.warn, .statuspill.warn { background: #fdf2e3; color: #b3720a; }
+.connector-needs-setup {
+  margin-top: 8px; font-size: 13px; font-weight: 600; color: #b3720a;
+  background: #fdf2e3; border-radius: 8px; padding: 7px 11px; width: fit-content;
+}
+
+/* AI provider waterfall (the provider_list config field) */
+.provider-list { gap: 10px; }
+.provider-empty { font-size: 13px; color: var(--mut); }
+.provider-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  border: 1px solid var(--bd); border-radius: 12px; padding: 10px 12px;
+  background: var(--card);
+}
+.provider-row.dragging { opacity: 0.55; border-style: dashed; }
+.provider-grip { cursor: grab; color: var(--mut); font-size: 15px; line-height: 1.6; user-select: none; }
+.provider-rank {
+  flex: none; width: 20px; height: 20px; border-radius: 50%; margin-top: 2px;
+  background: var(--inset); color: var(--sec); font-size: 11.5px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.provider-row-body { flex: 1; display: grid; gap: 7px; min-width: 0; }
+.provider-row-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.provider-tag {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+  background: var(--inset); color: var(--mut); border-radius: 6px; padding: 2px 7px;
+}
+.provider-tag.first { background: #e7f6ee; color: var(--up); }
+.provider-row-inputs { display: flex; gap: 8px; flex-wrap: wrap; }
+.provider-row-inputs input { flex: 1 1 180px; min-width: 0; }
+.provider-row-inputs input.provider-model { flex: 0 1 220px; }
+.provider-remove {
+  flex: none; background: none; border: 0; cursor: pointer;
+  color: var(--mut); font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+}
+.provider-remove:hover { color: var(--down); }
+.provider-add select { max-width: 260px; }
 .connector-desc, .ccdesc {
   font-size: 13.5px;
   color: var(--sec);

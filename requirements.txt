@@ -14,3 +14,8 @@ psycopg[binary]>=3.2,<4
 # Renders SECURITY.md / docs/*.md as the site's /security, /privacy, /terms
 # and /deploy pages, so policy links don't hand visitors off to GitHub.
 markdown>=3.6
+# Smart Import rasterizes PDF pages to images locally (with Pillow encoding
+# the PNGs), so any vision-capable AI provider can read statements — and only
+# pixels ever leave the machine.
+pypdfium2>=4.30
+pillow>=10
