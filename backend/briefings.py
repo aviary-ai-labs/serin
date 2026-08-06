@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from backend import ai_provider, db
+from backend import config as config_module
 from backend.ai_provider import (
     anthropic_available,
     deepseek_available,
@@ -235,6 +236,10 @@ def estimate_briefing_cost() -> dict[str, Any]:
     chain = ai_provider.provider_chain()
     if not chain:
         return {"provider": "none", "model": "", "estimated_cost_usd": None, "basis": "no provider configured"}
+    if chain[0]["kind"] == "anthropic" and config_module.ai_is_managed():
+        # Managed AI: the customer isn't paying per run and didn't pick the
+        # model — both are Serin's, so neither belongs on their screen.
+        return {"provider": "managed", "model": "", "estimated_cost_usd": None, "basis": "included with your plan"}
     provider = resolved_provider()
     model = chain[0]["model"]
 
@@ -444,8 +449,7 @@ async def call_openai_compat(entry: dict[str, Any], prompt: str) -> tuple[str, d
             json=body,
         )
     if response.status_code >= 400:
-        detail = response.text[:500]
-        raise RuntimeError(f"{entry['label']} API returned {response.status_code}: {detail}")
+        raise RuntimeError(ai_provider.http_error_detail(entry["label"], response.status_code, response.text))
 
     return parse_openai_chat_response(response.json(), entry["model"], entry["id"])
 
@@ -528,8 +532,7 @@ async def call_anthropic_api(prompt: str, model: str = "") -> tuple[str, dict[st
             json=body,
         )
     if response.status_code >= 400:
-        detail = response.text[:500]
-        raise RuntimeError(f"Anthropic API returned {response.status_code}: {detail}")
+        raise RuntimeError(ai_provider.http_error_detail("Anthropic", response.status_code, response.text))
 
     data = response.json()
     text_parts = [

@@ -219,6 +219,21 @@ def _friendly_cli_status_error(detail: str) -> str:
     return detail or "Claude CLI did not return a usable response."
 
 
+_ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com"
+
+
+def ai_is_managed() -> bool:
+    """Whether Anthropic-path AI calls are being served by Serin's managed
+    proxy rather than the user's own key.
+
+    The only thing that rewrites ``anthropic_base_url`` is the pack's
+    managed-AI activation (it points the base at the metering proxy and uses
+    the license token as the key), so a non-default base *is* the signal —
+    no pack import needed on this side of the seam.
+    """
+    return settings.anthropic_base_url.rstrip("/") != _ANTHROPIC_DEFAULT_BASE
+
+
 def get_ai_status(force: bool = False) -> dict[str, object]:
     now = time.time()
     if not force and _AI_STATUS_CACHE["status"] and now < float(_AI_STATUS_CACHE["expires_at"]):
@@ -238,6 +253,7 @@ def get_ai_status(force: bool = False) -> dict[str, object]:
         "model": settings.ai_model,
         "configured": provider != "none",
         "ready": provider != "none",
+        "managed": False,
         "error": "",
     }
 
@@ -253,6 +269,12 @@ def get_ai_status(force: bool = False) -> dict[str, object]:
         status.update({"ready": anthropic_available(), "model": settings.anthropic_model})
         if not anthropic_available():
             status["error"] = "Anthropic API key is not configured (AI briefing connector or ANTHROPIC_API_KEY)."
+        elif ai_is_managed():
+            # Managed AI: the pack routed this through Serin's metering proxy.
+            # Which model serves it is our implementation detail, not the
+            # customer's configuration — naming it invites treating it as a
+            # promise.
+            status.update({"managed": True, "model": ""})
     elif provider == "deepseek":
         status.update({"ready": deepseek_available(), "model": settings.deepseek_model})
         if not deepseek_available():

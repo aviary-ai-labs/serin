@@ -86,13 +86,13 @@ _IMPORT_MODEL_DEFAULTS = {
 }
 
 
-def _select_entry(has_image: bool) -> dict[str, Any]:
-    """Pick the first usable provider from the waterfall for this input type.
+def _select_entries(has_image: bool) -> list[dict[str, Any]]:
+    """The usable waterfall for this input type — extraction tries each in turn.
 
     Image inputs need a vision-capable provider (DeepSeek's hosted API rejects
     ``image_url`` blocks with a 400 — confirmed empirically 2026-06-30; the
-    Claude CLI path has no image plumbing either). Text goes to the head of
-    the chain.
+    Claude CLI path has no image plumbing either). Text can use the whole
+    chain.
     """
     chain = ai_provider.vision_chain() if has_image else ai_provider.provider_chain()
     chain = [e for e in chain if e["kind"] != "claude_cli"] if has_image else chain
@@ -108,10 +108,16 @@ def _select_entry(has_image: bool) -> dict[str, Any]:
             "AI briefing connector (Connectors tab → AI daily briefing → "
             "Configure)."
         )
-    entry = dict(chain[0])
-    if not entry.get("model_explicit") and entry["id"] in _IMPORT_MODEL_DEFAULTS:
-        entry["model"] = _IMPORT_MODEL_DEFAULTS[entry["id"]]
-    return entry
+    entries = []
+    for raw in chain:
+        entry = dict(raw)
+        if not entry.get("model_explicit") and entry["id"] in _IMPORT_MODEL_DEFAULTS:
+            entry["model"] = _IMPORT_MODEL_DEFAULTS[entry["id"]]
+        entries.append(entry)
+    return entries
+
+
+_http_detail = ai_provider.http_error_detail
 
 
 # --- Provider call paths -----------------------------------------------------
@@ -147,9 +153,7 @@ async def _call_openai_compat(
             json=body,
         )
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"{entry['label']} returned {response.status_code}: {response.text[:400]}"
-        )
+        raise RuntimeError(_http_detail(entry["label"], response.status_code, response.text))
     data = response.json()
     choices = data.get("choices") or [{}]
     text = (choices[0].get("message") or {}).get("content") or ""
@@ -179,9 +183,7 @@ async def _call_anthropic(
             json=body,
         )
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"Anthropic returned {response.status_code}: {response.text[:400]}"
-        )
+        raise RuntimeError(_http_detail("Anthropic", response.status_code, response.text))
     data = response.json()
     text_parts = [
         block.get("text", "")
@@ -421,17 +423,32 @@ async def extract(
         images = [(image_bytes, image_mime)]
 
     has_image = bool(images)
-    entry = _select_entry(has_image=has_image)
+    entries = _select_entries(has_image=has_image)
 
-    if has_image:
-        user_content = _build_image_content(images, entry, hint)
-    else:
-        user_content = _build_text_content(text or "", hint)
-
-    if entry["kind"] == "anthropic":
-        raw_text, usage = await _call_anthropic(entry, user_content)
-    else:
-        raw_text, usage = await _call_openai_compat(entry, user_content)
+    # The waterfall, same as briefings: a provider outage falls through to the
+    # next capable one instead of failing the import. Content is rebuilt per
+    # provider — image blocks are dialect-specific.
+    raw_text = ""
+    usage: dict[str, Any] = {}
+    entry = entries[0]
+    last_error: Exception | None = None
+    for candidate in entries:
+        entry = candidate
+        if has_image:
+            user_content = _build_image_content(images, entry, hint)
+        else:
+            user_content = _build_text_content(text or "", hint)
+        try:
+            if entry["kind"] == "anthropic":
+                raw_text, usage = await _call_anthropic(entry, user_content)
+            else:
+                raw_text, usage = await _call_openai_compat(entry, user_content)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error if isinstance(last_error, RuntimeError) else RuntimeError(str(last_error))
 
     parsed = _parse_response(raw_text)
     raw_rows = parsed.get("positions") or []

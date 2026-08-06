@@ -19,9 +19,16 @@ function StatusChip({ status }) {
 // portfolio goes — so that stays, and stays truthful.
 function aiProviderLabel(config) {
   if (!config) return '';
+  // Managed AI first: on Intelligence/Cloud the provider behind the proxy is
+  // Serin's implementation detail, same as the model.
+  if (config.ai_managed) return 'Serin AI';
   if (config.ai_provider === 'claude_cli') return 'Claude CLI (dev only)';
   if (config.ai_provider === 'anthropic_api') return 'Anthropic';
   if (config.ai_provider === 'deepseek') return 'DeepSeek';
+  if (config.ai_provider === 'managed') return 'Serin AI';
+  if (config.ai_provider && config.ai_provider !== 'none') {
+    return config.ai_provider.charAt(0).toUpperCase() + config.ai_provider.slice(1);
+  }
   return 'Not configured';
 }
 

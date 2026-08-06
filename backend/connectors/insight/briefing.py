@@ -79,5 +79,9 @@ class BriefingConnector(InsightConnector):
     def test(self) -> TestResult:
         status = get_ai_status(force=True)
         if status.get("ready"):
+            if status.get("managed"):
+                # Whose model serves managed AI is Serin's implementation
+                # detail, not the customer's configuration.
+                return TestResult(ok=True, message="Ready via Serin managed AI — included with your plan.")
             return TestResult(ok=True, message=f"Ready via {status.get('provider')} ({status.get('model')}).")
         return TestResult(ok=False, message=status.get("error") or "No AI provider configured.")

@@ -1356,7 +1356,10 @@ a:hover { text-decoration: underline; }
   background: #fdf2e3; border-radius: 8px; padding: 7px 11px; width: fit-content;
 }
 
-/* AI provider waterfall (the provider_list config field) */
+/* AI provider waterfall (the provider_list config field). Spans the whole
+   config grid — squeezed into one auto-fit column, its two inputs per row
+   were unusably narrow. */
+.config-field.provider-list { grid-column: 1 / -1; max-width: 640px; }
 .provider-list { gap: 10px; }
 .provider-empty { font-size: 13px; color: var(--mut); }
 .provider-row {

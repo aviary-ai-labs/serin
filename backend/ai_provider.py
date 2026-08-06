@@ -197,6 +197,19 @@ def vision_chain() -> list[dict]:
     return [e for e in provider_chain() if e["vision"]]
 
 
+def http_error_detail(label: str, status_code: int, text: str) -> str:
+    """A provider HTTP error a person can read.
+
+    Gateways answer outages with HTML error pages; pasting that soup into the
+    UI says nothing. Name the failure and whether trying again is sensible.
+    """
+    snippet = (text or "").strip()
+    if "<html" in snippet[:200].lower() or snippet[:1] == "<":
+        hint = " (gateway error — usually transient, try again)" if status_code in (502, 503, 504) else ""
+        return f"{label} returned {status_code}{hint}."
+    return f"{label} returned {status_code}: {snippet[:400]}"
+
+
 def resolved_provider() -> str:
     """Head of the chain, in the vocabulary the status surfaces have always
     used ("anthropic_api" | "deepseek" | "claude_cli" | ... | "none")."""

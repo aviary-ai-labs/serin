@@ -359,6 +359,7 @@ def api_config() -> dict:
         "ai_configured": bool(ai_status["ready"]),
         "ai_ready": bool(ai_status["ready"]),
         "ai_provider": ai_status["provider"],
+        "ai_managed": bool(ai_status.get("managed")),
         "ai_model": ai_status.get("model") or settings.ai_model,
         "ai_error": ai_status["error"],
         "claude_cli_available": settings.claude_cli_available,

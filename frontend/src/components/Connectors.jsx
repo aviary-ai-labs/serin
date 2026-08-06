@@ -635,6 +635,10 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
           {manifest.config_schema.map(field => {
             if (providerKeyFields.has(field.key)) return null;
             if (field.type === 'provider_list') {
+              // On a shared deployment this is the operator's to configure —
+              // the managed note above says so, and rendering read-only rows
+              // (with model names) here would only contradict it.
+              if (!fieldIsEditable(card, field)) return null;
               return (
                 <ProviderListEditor
                   key={field.key}

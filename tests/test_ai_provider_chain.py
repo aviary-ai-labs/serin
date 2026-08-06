@@ -175,3 +175,63 @@ def test_garbage_pdf_fails_with_a_human_message():
 
     with pytest.raises(RuntimeError, match="Could not read that PDF"):
         smart_import._pdf_page_images(b"not a pdf at all")
+
+
+# --- managed AI hides the machinery -----------------------------------------
+
+
+def test_managed_ai_hides_model_and_marks_status(clean_env):
+    from backend import config as config_module
+
+    clean_env.setattr(settings, "anthropic_api_key", "lic-token")
+    clean_env.setattr(settings, "anthropic_base_url", "https://serin-billing.fly.dev/ai")
+    _portal(clean_env, {"provider": "anthropic_api"})
+    status = config_module.get_ai_status(force=True)
+    assert status["managed"] is True
+    assert status["model"] == ""
+    assert status["ready"] is True
+
+
+def test_own_key_is_not_managed(clean_env):
+    from backend import config as config_module
+
+    clean_env.setattr(settings, "anthropic_api_key", "sk-ant-own")
+    clean_env.setattr(settings, "anthropic_base_url", "https://api.anthropic.com")
+    _portal(clean_env, {"provider": "anthropic_api"})
+    status = config_module.get_ai_status(force=True)
+    assert status["managed"] is False
+    assert status["model"]  # named, because it is the user's own choice
+
+
+def test_gateway_html_errors_become_readable():
+    detail = ai_provider.http_error_detail("Anthropic", 502, "<html><body>Bad Gateway</body></html>")
+    assert "502" in detail and "html" not in detail.lower().replace("transient", "")
+    assert "try again" in detail
+    plain = ai_provider.http_error_detail("DeepSeek", 402, '{"error": "Insufficient Balance"}')
+    assert "Insufficient Balance" in plain
+
+
+# --- Smart Import falls through the vision waterfall -------------------------
+
+
+def test_import_vision_fallback_tries_next_provider(clean_env, monkeypatch):
+    import asyncio
+
+    from backend import smart_import
+
+    _portal(clean_env, {
+        "providers": [{"id": "anthropic"}, {"id": "openai"}],
+        "anthropic_api_key": "ant",
+        "openai_api_key": "oai",
+    })
+
+    async def failing_anthropic(entry, content):
+        raise RuntimeError("Anthropic returned 502 (gateway error).")
+
+    async def working_openai(entry, content):
+        return '{"positions": [], "notes": "via openai"}', {"provider": entry["id"]}
+
+    monkeypatch.setattr(smart_import, "_call_anthropic", failing_anthropic)
+    monkeypatch.setattr(smart_import, "_call_openai_compat", working_openai)
+    result = asyncio.run(smart_import.extract(image_bytes=b"png", image_mime="image/png"))
+    assert result["provider"] == "openai"
