@@ -57,18 +57,11 @@ class BriefingConnector(InsightConnector):
                 help="Tried top to bottom — drag to reorder. Each provider keeps its own key and model.",
             ),
             *_provider_key_fields(),
-            ConfigField(
-                key="style",
-                owner="user",
-                label="Default briefing style",
-                type="select",
-                default="operator",
-                options=[
-                    {"value": "operator", "label": "Operator — structured daily review"},
-                    {"value": "analyst", "label": "Analyst — deeper themes & interpretation"},
-                    {"value": "executive", "label": "Executive — 60-second summary"},
-                ],
-            ),
+            # No "default briefing style" here, deliberately. The style that
+            # actually runs — manual and scheduled both — is the Briefings
+            # tab's preference (db.get_briefing_preferences); a second control
+            # here was read by nothing and could only teach people the wrong
+            # place to change it.
         ],
     )
 
