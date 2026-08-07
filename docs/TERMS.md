@@ -32,16 +32,15 @@ bought until then, and you are not charged again.
 
 ## Refunds
 
-**Within 14 days of a charge, ask and we'll refund it in full.** No conditions,
-no explaining yourself. That covers a first purchase and every renewal.
+**All sales are final.** We don't offer refunds — not on a first charge and
+not on renewals. What you can always do is cancel: you keep everything you've
+paid for until the end of the current period, and you aren't charged again.
 
-After 14 days we don't refund the current period, but you can cancel so you
-aren't charged again. If something on our side was broken — Cloud was down, or
-a licence key we issued didn't work — tell us and we'll make it right
-regardless of the calendar.
+If something on our side was broken — Cloud was down, or a licence key we
+issued didn't work — tell us and we'll make it right.
 
-If you're in the UK or EU, this sits alongside your statutory cancellation
-rights rather than replacing them.
+If you're in the UK or EU, statutory consumer rights that can't be waived
+apply notwithstanding the above.
 
 ## What we ask of you
 
