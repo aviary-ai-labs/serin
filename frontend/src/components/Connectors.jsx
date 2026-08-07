@@ -313,7 +313,9 @@ export function ConnectorsView({ addToast, onChanged }) {
             <button className="btn btn-primary btn-sm" disabled={busy === 'license' || !licenseKey.trim()} onClick={saveLicense}>
               {busy === 'license' ? 'Saving…' : 'Activate'}
             </button>
-            <a className="btn btn-sm btn-ghost" href="/#pricing" target="_blank" rel="noreferrer">Get a key ↗</a>
+            {/* /pricing, not /#pricing: self-host has no landing page — the
+                route sends the buyer to the public site's pricing instead. */}
+            <a className="btn btn-sm btn-ghost" href="/pricing" target="_blank" rel="noreferrer">Get a key ↗</a>
           </div>
         )}
         {license?.claimed?.email && !license?.active && (
@@ -547,9 +549,13 @@ function ConnectorCard({ card, open, draft, test, busy, onToggleEnabled, onStart
   const operatorRun = hasConfig && !manifest.config_schema.some(f => fieldIsEditable(card, f));
   const anyEditable = hasConfig && !operatorRun;
   // needs_setup outranks everything: an enabled connector that can't work is
-  // the state most worth being loud about.
-  const statusTone = enabled ? (card.needs_setup ? 'warn' : 'on') : 'off';
-  const statusLabel = enabled ? (card.needs_setup ? 'Needs setup' : (configured ? 'Active' : 'On (defaults)')) : 'Off';
+  // the state most worth being loud about. And a market-data source serving
+  // every quote from env config must not read "Off".
+  const servingViaEnv = card.serving_prices && !enabled;
+  const statusTone = enabled ? (card.needs_setup ? 'warn' : 'on') : (servingViaEnv ? 'on' : 'off');
+  const statusLabel = enabled
+    ? (card.needs_setup ? 'Needs setup' : (configured ? 'Active' : 'On (defaults)'))
+    : (servingViaEnv ? 'Active (env)' : 'Off');
   const providerListField = manifest.config_schema.find(f => f.type === 'provider_list');
   // Keys live inside their provider rows; the generic loop must not render
   // them a second time below the list.

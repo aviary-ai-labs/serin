@@ -52,3 +52,8 @@ def configure_logging(log_format: str = "text") -> None:
     for handler in handlers:
         handler.setFormatter(formatter)
     root.setLevel(logging.INFO)
+    # httpx logs every request URL at INFO — and providers that authenticate
+    # via query string (FMP) would put their API key in the log with it.
+    # Warnings and errors still come through; routine request lines don't.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

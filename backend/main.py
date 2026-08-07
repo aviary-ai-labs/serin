@@ -816,8 +816,18 @@ def _offered(manifest) -> bool:
 
 
 def _connector_card(manifest) -> dict:
+    from backend import connectors as connectors_pkg
+
     cls = connector_registry.get_class(manifest.id)
     return {
+        # A market-data connector can be serving every quote via env config
+        # while its toggle reads Off — say so, or the card lies about who
+        # actually answers price requests.
+        "serving_prices": (
+            manifest.kind == "market_data"
+            and getattr(manifest, "asset_scope", "all") == "all"
+            and connectors_pkg.active_market_data_id() == manifest.id
+        ),
         "manifest": manifest.to_dict(),
         "enabled": connector_registry.is_enabled(manifest.id),
         "config": connector_registry.public_config(manifest.id),
