@@ -26,9 +26,15 @@ call.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -95,7 +101,6 @@ def _select_entries(has_image: bool) -> list[dict[str, Any]]:
     chain.
     """
     chain = ai_provider.vision_chain() if has_image else ai_provider.provider_chain()
-    chain = [e for e in chain if e["kind"] != "claude_cli"] if has_image else chain
     if not chain:
         if has_image and ai_provider.provider_chain():
             raise RuntimeError(
@@ -198,6 +203,71 @@ async def _call_anthropic(
         "model": entry["model"],
         "provider": "anthropic_api",
     }
+
+
+async def _call_claude_cli(
+    entry: dict[str, Any],
+    text: str | None,
+    images: list[tuple[bytes, str]],
+    hint: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Extraction via the local `claude` binary — no API key, your sign-in.
+
+    The CLI has no image argument, but it is an agent with file access: write
+    the pages to a temp directory, run it there, and tell it to read them.
+    The directory is deleted the moment the call returns.
+    """
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        raise RuntimeError("Claude CLI is not installed or not in PATH")
+
+    instructions = SYSTEM_PROMPT + "\n\n"
+    if hint:
+        instructions += f"User hint: {hint}\n\n"
+
+    with tempfile.TemporaryDirectory(prefix="serin-import-") as tmpdir:
+        if images:
+            paths = []
+            for index, (image_bytes, mime_type) in enumerate(images):
+                suffix = ".png" if "png" in mime_type else ".jpg"
+                path = Path(tmpdir) / f"page-{index + 1}{suffix}"
+                path.write_bytes(image_bytes)
+                paths.append(path.name)
+            prompt = (
+                f"{instructions}Read the image file{'s' if len(paths) > 1 else ''} "
+                f"{', '.join(paths)} in the current directory — screenshots or "
+                "statement pages of portfolio positions. Extract every position. "
+                "Reply with ONLY the JSON object, no other text."
+            )
+        else:
+            prompt = (
+                f"{instructions}Extract every portfolio position from the following "
+                f"content. Reply with ONLY the JSON object, no other text.\n---\n{text}\n---"
+            )
+
+        env = os.environ.copy()
+        if settings.claude_code_oauth_token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = settings.claude_code_oauth_token
+
+        def _run() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [claude_bin, "--print", "--model", entry["model"], prompt],
+                capture_output=True,
+                text=True,
+                timeout=240,
+                env=env,
+                cwd=tmpdir,
+            )
+
+        result = await asyncio.to_thread(_run)
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:800]
+        raise RuntimeError(f"Claude CLI returned {result.returncode}: {detail or 'no output'}")
+    output = (result.stdout or "").strip()
+    if not output:
+        raise RuntimeError("Claude CLI response was empty")
+    return output, {"provider": "claude_cli", "model": entry["model"]}
 
 
 def _build_text_content(text: str, hint: str | None) -> list[dict[str, Any]]:
@@ -388,6 +458,11 @@ def _privacy_notice(entry: dict[str, Any]) -> str:
             f"This content is parsed by your local Ollama ({entry['model']}) — "
             "nothing leaves this machine."
         )
+    if entry["id"] == "claude_cli":
+        return (
+            f"This content is parsed via your Claude CLI ({entry['model']}) — "
+            "it goes to Anthropic under your own sign-in."
+        )
     return (
         f"This content will be sent to {entry['label']} ({entry['model']}) for parsing. "
         "Crop or redact anything sensitive (account numbers, names, addresses) first."
@@ -434,14 +509,14 @@ async def extract(
     last_error: Exception | None = None
     for candidate in entries:
         entry = candidate
-        if has_image:
-            user_content = _build_image_content(images, entry, hint)
-        else:
-            user_content = _build_text_content(text or "", hint)
         try:
-            if entry["kind"] == "anthropic":
+            if entry["kind"] == "claude_cli":
+                raw_text, usage = await _call_claude_cli(entry, text, images, hint)
+            elif entry["kind"] == "anthropic":
+                user_content = _build_image_content(images, entry, hint) if has_image else _build_text_content(text or "", hint)
                 raw_text, usage = await _call_anthropic(entry, user_content)
             else:
+                user_content = _build_image_content(images, entry, hint) if has_image else _build_text_content(text or "", hint)
                 raw_text, usage = await _call_openai_compat(entry, user_content)
             last_error = None
             break

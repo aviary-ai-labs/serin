@@ -114,9 +114,11 @@ CATALOG: list[ProviderSpec] = [
         label="Claude CLI (local dev)",
         kind="claude_cli",
         default_model="claude-sonnet-4-6",
-        vision=False,
+        # The CLI is an agent with file access — hand it image files on disk
+        # and it reads them, which is how Smart Import feeds it screenshots.
+        vision=True,
         needs_key=False,
-        help="Uses your local `claude` binary and its sign-in.",
+        help="Uses your local `claude` binary and its sign-in — screenshots and PDFs included.",
     ),
 ]
 

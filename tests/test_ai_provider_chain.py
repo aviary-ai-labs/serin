@@ -235,3 +235,31 @@ def test_import_vision_fallback_tries_next_provider(clean_env, monkeypatch):
     monkeypatch.setattr(smart_import, "_call_openai_compat", working_openai)
     result = asyncio.run(smart_import.extract(image_bytes=b"png", image_mime="image/png"))
     assert result["provider"] == "openai"
+
+
+def test_claude_cli_import_writes_pages_and_parses_reply(clean_env, monkeypatch):
+    """CLI extraction: pages land on disk for the agent to read, and are gone
+    after the call. The subprocess is stubbed; everything around it is real."""
+    import asyncio
+    import subprocess
+
+    from backend import smart_import
+
+    monkeypatch.setattr("backend.config.shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("backend.smart_import.shutil.which", lambda name: "/usr/bin/claude")
+    _portal(clean_env, {"providers": [{"id": "claude_cli"}]})
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        cwd = kwargs["cwd"]
+        seen["files"] = sorted(p.name for p in __import__("pathlib").Path(cwd).iterdir())
+        seen["prompt_mentions_page"] = "page-1.png" in cmd[-1]
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"positions": [{"symbol": "NKE", "quantity": 1, "average_cost": 42.68}]}', stderr="")
+
+    monkeypatch.setattr("backend.smart_import.subprocess.run", fake_run)
+    result = asyncio.run(smart_import.extract(image_bytes=b"fakepng", image_mime="image/png"))
+    assert seen["files"] == ["page-1.png"]
+    assert seen["prompt_mentions_page"] is True
+    assert result["provider"] == "claude_cli"
+    assert result["rows"][0]["symbol"] == "NKE"
