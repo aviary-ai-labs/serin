@@ -360,7 +360,10 @@ def api_config() -> dict:
         "ai_ready": bool(ai_status["ready"]),
         "ai_provider": ai_status["provider"],
         "ai_managed": bool(ai_status.get("managed")),
-        "ai_model": ai_status.get("model") or settings.ai_model,
+        # Managed AI blanks the model deliberately — which model serves it is
+        # ours to change, not a promise. The fallback would have handed it
+        # straight back.
+        "ai_model": ai_status.get("model") or ("" if ai_status.get("managed") else settings.ai_model),
         "ai_error": ai_status["error"],
         "claude_cli_available": settings.claude_cli_available,
         "claude_cli_configured": settings.claude_cli_configured,

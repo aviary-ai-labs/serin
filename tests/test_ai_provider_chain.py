@@ -192,6 +192,22 @@ def test_managed_ai_hides_model_and_marks_status(clean_env):
     assert status["ready"] is True
 
 
+def test_config_endpoint_does_not_hand_the_managed_model_back(clean_env):
+    """get_ai_status blanks the model on purpose; /api/config used to fall
+    back to settings.ai_model and undo it."""
+    from backend.main import api_config
+
+    clean_env.setattr(settings, "anthropic_api_key", "lic-token")
+    clean_env.setattr(settings, "anthropic_base_url", "https://serin-billing.fly.dev/ai")
+    _portal(clean_env, {"provider": "anthropic_api"})
+    from backend import config as config_module
+
+    config_module.reset_ai_status_cache()
+    payload = api_config()
+    assert payload["ai_managed"] is True
+    assert payload["ai_model"] == ""
+
+
 def test_own_key_is_not_managed(clean_env):
     from backend import config as config_module
 

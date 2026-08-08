@@ -504,7 +504,12 @@ export function BriefingsView({
               <div className="briefing-meta">
                 <span>{dateDay(selected.created_at)}</span>
                 {selected.completed_at && <span>took {durationLabel(selected.created_at, selected.completed_at)}</span>}
-                {selected.model_cost_usd > 0 && <span>~{moneyPrecise(selected.model_cost_usd)}</span>}
+                {/* Managed AI is included in the plan, so the run's list-price
+                    cost is our bookkeeping, not a charge — showing it reads as
+                    one. Self-hosters pay it and should see it. */}
+                {selected.model_cost_usd > 0 && !config?.ai_managed && (
+                  <span>~{moneyPrecise(selected.model_cost_usd)}</span>
+                )}
                 {selected.emailed_at && <span>emailed {timeAgo(selected.emailed_at)}</span>}
                 <span className="spacer" />
                 {selected.status === 'done' && config?.email_configured && (
