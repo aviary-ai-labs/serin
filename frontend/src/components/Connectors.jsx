@@ -314,6 +314,7 @@ export function ConnectorsView({ addToast, onChanged }) {
         ) : license?.active ? (
           <div className="license-actions">
             <a className="btn btn-sm" href="/pricing" target="_blank" rel="noreferrer">Manage plan ↗</a>
+            <a className="btn btn-sm btn-ghost" href="https://serin.money/cancel" target="_blank" rel="noreferrer">Cancel subscription ↗</a>
             <button className="btn btn-sm btn-ghost" disabled={busy === 'license'} onClick={removeLicense}>Remove key</button>
           </div>
         ) : (

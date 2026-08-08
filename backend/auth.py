@@ -35,6 +35,12 @@ PUBLIC_API_PREFIXES = (
     # creates a Stripe session and reads nothing, so there is no data behind it.
     "/api/billing/checkout",
     "/api/v1/billing/checkout",
+    # Cancellation is the same story in reverse: the person it exists for is
+    # a subscriber standing on the public site, not someone signed into this
+    # instance. It proxies to billing, which proves inbox ownership by email
+    # before anything is cancelled — no data lives behind these paths.
+    "/api/billing/cancel/",
+    "/api/v1/billing/cancel/",
 )
 
 

@@ -17,8 +17,8 @@ Both renew automatically until cancelled.
 
 ## Cancelling
 
-Cancel any time, from the billing portal or by emailing us. Cancellation takes
-effect at the **end of the period you've already paid for** — you keep what you
+Cancel any time at [serin.money/cancel](https://serin.money/cancel) or by
+emailing us. Cancellation takes effect at the **end of the period you've already paid for** — you keep what you
 bought until then, and you are not charged again.
 
 - **Intelligence:** licence keys are issued for about 40 days and renewed each

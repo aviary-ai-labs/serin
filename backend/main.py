@@ -460,6 +460,56 @@ def _api_billing_checkout(body: _CheckoutBody):
     return resp.json()
 
 
+# Cancellation proxies: same-origin like checkout, so the public cancel page
+# never makes a cross-origin call. Rate-limited — the request endpoint sends
+# email, so an unthrottled form is also a way to spam somebody's inbox.
+_CANCEL_LIMIT = ratelimit.RateLimiter(limit=5, window_seconds=900)
+
+
+class _CancelRequestBody(BaseModel):
+    email: str = ""
+    reason: str = ""
+    detail: str = ""
+
+
+def _billing_post(path: str, payload: dict) -> dict:
+    import httpx
+
+    from backend.config import settings
+
+    if not settings.billing_url:
+        raise HTTPException(503, "Billing is not configured (SERIN_BILLING_URL).")
+    try:
+        resp = httpx.post(settings.billing_url.rstrip("/") + path, json=payload, timeout=20)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Billing unreachable: {exc}") from exc
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("detail") or ""
+        except ValueError:
+            detail = ""
+        raise HTTPException(resp.status_code, detail or f"Billing error ({resp.status_code}).")
+    return resp.json()
+
+
+def _api_billing_cancel_request(body: _CancelRequestBody, request: Request):
+    for key in (ratelimit.client_ip(request.headers), (body.email or "").strip().lower()):
+        if key and not _CANCEL_LIMIT.check(key):
+            raise HTTPException(429, "Too many attempts. Try again shortly.")
+    return _billing_post("/cancel/request", body.model_dump())
+
+
+class _CancelConfirmBody(BaseModel):
+    token: str = ""
+
+
+def _api_billing_cancel_confirm(body: _CancelConfirmBody, request: Request):
+    ip = ratelimit.client_ip(request.headers)
+    if ip and not _CANCEL_LIMIT.check(ip):
+        raise HTTPException(429, "Too many attempts. Try again shortly.")
+    return _billing_post("/cancel/confirm", body.model_dump())
+
+
 @app.get("/api/portfolio")
 def api_portfolio():
     return db.portfolio_summary()
@@ -1048,6 +1098,8 @@ _alias_v1("license", _api_put_license, methods=["PUT"])
 _alias_v1("license", _api_delete_license, methods=["DELETE"])
 _alias_v1("admin/install-pack", _api_install_pack, methods=["POST"])
 _alias_v1("billing/checkout", _api_billing_checkout, methods=["POST"])
+_alias_v1("billing/cancel/request", _api_billing_cancel_request, methods=["POST"])
+_alias_v1("billing/cancel/confirm", _api_billing_cancel_confirm, methods=["POST"])
 _alias_v1("cloud/migrate", _api_cloud_migrate, methods=["POST"])
 
 
@@ -1257,6 +1309,17 @@ if dist_dir.exists():
     def refund_page():
         """The refund policy is a section of the terms; keep the short URL."""
         return RedirectResponse("/terms", status_code=301)
+
+    @app.get("/cancel")
+    def cancel_page():
+        """Self-serve cancellation. Hosted deployments bake cancel.html into
+        dist (same switch as the landing page); a self-host box sends the
+        subscriber to the public site, where their subscription actually
+        lives."""
+        page = dist_dir / "cancel.html"
+        if page.exists():
+            return FileResponse(page)
+        return RedirectResponse("https://serin.money/cancel", status_code=302)
 
     @app.get("/{path:path}")
     def spa_fallback(path: str):
