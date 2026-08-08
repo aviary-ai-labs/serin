@@ -10,6 +10,10 @@ const KIND_META = {
 };
 const KIND_ORDER = ['market_data', 'holdings', 'insight'];
 
+// Blank means "leave the stored key alone" (the field renders a mask), so
+// removing one needs its own signal — see CLEAR_SECRET in the registry.
+const CLEAR_SECRET = '__serin_clear__';
+
 // Trust posture for a holdings connector (see docs/CONNECTOR-TRUST.md).
 const POSTURE = {
   oauth: { label: 'Connect', cls: 'safe' },
@@ -760,7 +764,7 @@ function ProviderListEditor({ field, rows, draft, config, editable, onRows, onKe
                     type="password"
                     disabled={!editable}
                     value={draft[opt.key_field] ?? ''}
-                    placeholder={keySet ? '•••••••• (set — leave blank to keep)' : 'API key'}
+                    placeholder={keySet ? '•••••••• (set — blank keeps it, × removes it)' : 'API key'}
                     aria-label={`${opt.label} API key`}
                     onChange={e => onKey(opt.key_field, e.target.value)}
                   />
@@ -792,7 +796,14 @@ function ProviderListEditor({ field, rows, draft, config, editable, onRows, onKe
                 type="button"
                 className="provider-remove"
                 aria-label={`Remove ${opt.label}`}
-                onClick={() => onRows(rows.filter((_, i) => i !== index))}
+                onClick={() => {
+                  // Take the key with the row. Leaving it behind was invisible
+                  // and consequential: a stored Anthropic key keeps managed AI
+                  // switched off, so the provider you just removed goes on
+                  // deciding what happens.
+                  if (keySet && opt.key_field) onKey(opt.key_field, CLEAR_SECRET);
+                  onRows(rows.filter((_, i) => i !== index));
+                }}
               >×</button>
             )}
           </div>

@@ -57,6 +57,40 @@ def test_blank_secret_does_not_wipe_stored_secret(tmp_path):
     assert cfg["base_url"] == "https://x.test"
 
 
+def test_clear_sentinel_removes_a_stored_secret(tmp_path):
+    """The other half of the masked field: a key you can add and never remove
+    is a key that goes on deciding things (managed AI, for one) invisibly."""
+    _fresh_db(tmp_path)
+    registry.set_config("fmp", {"api_key": "sk-secret", "base_url": "https://x.test"})
+    registry.set_config("fmp", {"api_key": registry.CLEAR_SECRET})
+    cfg = registry.get_config("fmp")
+    assert not cfg.get("api_key")
+    assert cfg["base_url"] == "https://x.test"  # only the secret went
+    assert registry.public_config("fmp")["api_key__is_set"] is False
+
+
+def test_clearing_the_last_field_is_persisted(tmp_path):
+    """A removal that empties the config must still be written — an early
+    return on "nothing to save" would leave the deleted key in the row."""
+    _fresh_db(tmp_path)
+    registry.set_config("fmp", {"api_key": "sk-secret"})
+    registry.set_config("fmp", {"api_key": registry.CLEAR_SECRET})
+    assert not registry.get_config("fmp").get("api_key")
+
+
+def test_config_listeners_run_after_a_save(tmp_path):
+    _fresh_db(tmp_path)
+    seen: list[str] = []
+    registry.on_config_saved(seen.append)
+    registry.on_config_saved(lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
+    try:
+        registry.set_config("fmp", {"api_key": "sk-secret"})
+    finally:
+        registry._CONFIG_LISTENERS.clear()
+    assert seen == ["fmp"]  # and the raising listener did not fail the save
+    assert registry.get_config("fmp")["api_key"] == "sk-secret"
+
+
 # --- enable state -----------------------------------------------------------
 
 def test_default_enabled_state(tmp_path):

@@ -239,6 +239,18 @@ def ai_is_managed() -> bool:
     return settings.anthropic_base_url.rstrip("/") != _ANTHROPIC_DEFAULT_BASE
 
 
+def reset_ai_status_cache() -> None:
+    """Forget the cached AI status.
+
+    Status is cached for five minutes, which is fine for a health check and
+    wrong the moment configuration changes — a key added or removed in the
+    portal would otherwise keep answering with the old provider until the
+    cache aged out.
+    """
+    _AI_STATUS_CACHE["status"] = None
+    _AI_STATUS_CACHE["expires_at"] = 0.0
+
+
 def get_ai_status(force: bool = False) -> dict[str, object]:
     now = time.time()
     if not force and _AI_STATUS_CACHE["status"] and now < float(_AI_STATUS_CACHE["expires_at"]):

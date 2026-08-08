@@ -32,7 +32,7 @@ from backend.briefings import (
     normalize_briefing_style,
     run_daily_briefing,
 )
-from backend.config import APP_VERSION, REPO_ROOT, get_ai_status, settings
+from backend.config import APP_VERSION, REPO_ROOT, get_ai_status, reset_ai_status_cache, settings
 from backend.connectors import registry as connector_registry
 from backend.csv_import import parse_positions_csv
 from backend.models import (
@@ -913,6 +913,16 @@ def _api_connector(connector_id: str):
     if manifest is None or not _offered(manifest):
         raise HTTPException(404, f"Unknown connector: {connector_id}")
     return _connector_card(manifest)
+
+
+def _forget_ai_status(connector_id: str) -> None:
+    """Whoever just changed the AI connector should see the result of it, not
+    the answer cached before they changed it."""
+    if connector_id == "ai_briefing":
+        reset_ai_status_cache()
+
+
+connector_registry.on_config_saved(_forget_ai_status)
 
 
 class ConnectorConfigBody(BaseModel):

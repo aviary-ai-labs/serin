@@ -14,12 +14,39 @@ making the portal the primary way to configure connectors.
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from typing import Any
 
 from backend import db, scope
 from backend.connectors.base import Connector, ConnectorManifest, TestResult
 
+logger = logging.getLogger(__name__)
+
 _REGISTRY: dict[str, type[Connector]] = {}
+
+# A secret arriving blank means "unchanged" — the portal renders a mask, and a
+# blank save must not wipe the key behind it. Deleting one therefore needs a
+# value no real secret can be.
+CLEAR_SECRET = "__serin_clear__"
+
+# Callbacks run after a connector's config is saved. The pack uses this to
+# re-decide managed AI: whether it engages depends on whether the user has a
+# key of their own, which is exactly what a save can change.
+_CONFIG_LISTENERS: list[Callable[[str], None]] = []
+
+
+def on_config_saved(callback: Callable[[str], None]) -> None:
+    """Register a callback invoked with the connector id after each save."""
+    _CONFIG_LISTENERS.append(callback)
+
+
+def _config_saved(connector_id: str) -> None:
+    for callback in list(_CONFIG_LISTENERS):
+        try:
+            callback(connector_id)
+        except Exception:  # a listener must never fail the save it observes
+            logger.exception("connector config listener failed for %s", connector_id)
 
 
 def register(cls: type[Connector]) -> type[Connector]:
@@ -156,7 +183,9 @@ def set_config(connector_id: str, config: dict[str, Any]) -> dict[str, Any]:
     """Merge incoming config over the stored config, filing each field by owner.
 
     Secret fields that arrive blank are treated as "unchanged" so the portal
-    can render a masked field without wiping the stored secret on save.
+    can render a masked field without wiping the stored secret on save; a
+    field set to ``CLEAR_SECRET`` is deleted instead, which is the only way to
+    take a key back out once it is in.
     Secret values are AES-GCM encrypted before they touch the database.
 
     Instance-owned fields are refused outright on a shared deployment — see
@@ -172,9 +201,17 @@ def set_config(connector_id: str, config: dict[str, Any]) -> dict[str, Any]:
     merged = dict(current)
     writable_instance = instance_config_is_writable()
     ignored: list[str] = []
+    cleared: list[str] = []
     for key, value in (config or {}).items():
         if key in secret_keys and (value is None or value == ""):
             continue  # keep existing secret
+        if key in secret_keys and value == CLEAR_SECRET:
+            if key not in user_keys and not writable_instance:
+                ignored.append(key)
+                continue
+            merged.pop(key, None)
+            cleared.append(key)
+            continue
         if key not in user_keys and not writable_instance:
             # Operator-owned; set it in the environment, not here. Recorded
             # rather than merely dropped: a client that round-trips the whole
@@ -198,8 +235,11 @@ def set_config(connector_id: str, config: dict[str, Any]) -> dict[str, Any]:
             json.dumps(_encrypted({k: v for k, v in merged.items() if k in user_keys})),
         )
     instance_part = {k: v for k, v in merged.items() if k not in user_keys}
-    if writable_instance and instance_part:
+    # `cleared` keeps the write happening when a removal empties the instance
+    # part — skipping it there would leave the deleted key sitting in the row.
+    if writable_instance and (instance_part or cleared):
         _instance_set(_config_key(connector_id), json.dumps(_encrypted(instance_part)))
+    _config_saved(connector_id)
     # Reported alongside the result rather than stored, so nothing about a
     # refused write ends up persisted in the config it was refused from.
     return dict(merged, ignored_fields=ignored) if ignored else merged
