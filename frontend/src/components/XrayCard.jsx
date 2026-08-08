@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 
 // The X-ray is pack-driven: the frontend holds no paid logic and renders
@@ -27,6 +27,42 @@ const pct = x => `${(Math.max(0, x || 0) * 100).toFixed(1)}%`;
 const pctFine = x => `${(Math.max(0, x || 0) * 100).toFixed(2)}%`; // fee-sized numbers
 const SIZE_LABELS = { mega: 'Mega cap', large: 'Large cap', mid: 'Mid cap', small: 'Small cap' };
 const CONCENTRATION = hhi => (hhi > 0.25 ? 'Concentrated' : hhi > 0.15 ? 'Moderate' : 'Diversified');
+// A verdict is worth a colour: red for a portfolio riding on a few names.
+const CONCENTRATION_TONE = hhi => (hhi > 0.25 ? 'negative' : hhi > 0.15 ? 'warn' : 'positive');
+
+// A stat value that shrinks until it fits its card. These cards hold both
+// "0.0%" and "Concentrated"; one type size cannot serve both, and the long
+// words ran past the border. Measuring beats guessing at a width that depends
+// on the viewport, the label, and how many cards the report decided to render.
+function FitValue({ children, className = '', max = 30, min = 15 }) {
+  const ref = useRef(null);
+  const fittedAt = useRef(-1);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const fit = () => {
+      el.style.fontSize = `${max}px`;
+      const avail = el.clientWidth;   // content box — what we have
+      const needed = el.scrollWidth;  // the nowrap text — what we want
+      if (needed > avail && avail > 0) {
+        el.style.fontSize = `${Math.max(min, Math.floor((max * avail) / needed))}px`;
+      }
+      fittedAt.current = avail;
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    // Width-guarded: shrinking the type changes the element's height, and an
+    // observer that reacted to that would chase its own tail.
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth !== fittedAt.current) fit();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  return <div ref={ref} className={`stat-value ${className}`.trim()}>{children}</div>;
+}
 
 // --- Overview sidebar teaser -------------------------------------------------
 
@@ -124,7 +160,7 @@ function XrayReport({ data, onReload }) {
       <section className="stats-grid xray-band">
         <div className="stat-card">
           <div className="stat-label">Concentration</div>
-          <div className="stat-value">{CONCENTRATION(hhi)}</div>
+          <FitValue className={CONCENTRATION_TONE(hhi)}>{CONCENTRATION(hhi)}</FitValue>
           <div className="stat-sub">
             {data.effective_holdings != null
               ? `${data.effective_holdings} effective of ${data.holdings_count} holdings`
@@ -133,18 +169,18 @@ function XrayReport({ data, onReload }) {
         </div>
         <div className="stat-card">
           <div className="stat-label">Top 5 weight</div>
-          <div className="stat-value">{pct(data.top5_weight)}</div>
+          <FitValue>{pct(data.top5_weight)}</FitValue>
           <div className="stat-sub">of total value</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Cash drag</div>
-          <div className="stat-value">{pct(data.cash_drag)}</div>
+          <FitValue>{pct(data.cash_drag)}</FitValue>
           <div className="stat-sub">uninvested</div>
         </div>
         {fees && (
           <div className="stat-card">
             <div className="stat-label">Fund fees</div>
-            <div className="stat-value">{pctFine(fees.weighted_expense_ratio)}</div>
+            <FitValue>{pctFine(fees.weighted_expense_ratio)}</FitValue>
             <div className="stat-sub">
               {fees.funds?.length ? `≈ $${Math.round(fees.annual_cost).toLocaleString()}/yr` : 'none detected'}
             </div>
@@ -153,23 +189,23 @@ function XrayReport({ data, onReload }) {
         {factor?.weighted_beta != null && (
           <div className="stat-card">
             <div className="stat-label">Beta</div>
-            <div className="stat-value">{factor.weighted_beta.toFixed(2)}</div>
+            <FitValue>{factor.weighted_beta.toFixed(2)}</FitValue>
             <div className="stat-sub">portfolio-weighted vs market</div>
           </div>
         )}
         {factor?.weighted_dividend_yield != null && (
           <div className="stat-card">
             <div className="stat-label">Dividend yield</div>
-            <div className="stat-value">{pct(factor.weighted_dividend_yield)}</div>
+            <FitValue>{pct(factor.weighted_dividend_yield)}</FitValue>
             <div className="stat-sub">trailing, weighted</div>
           </div>
         )}
         {benchHead && (
           <div className="stat-card">
             <div className="stat-label">vs {benchmark.symbol} · {PERIOD_LABELS[benchHead.period] || benchHead.period}</div>
-            <div className={`stat-value ${benchHead.delta_pct >= 0 ? 'positive' : 'negative'}`}>
+            <FitValue className={benchHead.delta_pct >= 0 ? 'positive' : 'negative'}>
               {signedPct(benchHead.delta_pct)}
-            </div>
+            </FitValue>
             <div className="stat-sub">
               you {signedPct(benchHead.portfolio_pct)} · {benchmark.symbol} {signedPct(benchHead.benchmark_pct)}
             </div>

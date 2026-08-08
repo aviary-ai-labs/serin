@@ -250,6 +250,7 @@ a:hover { text-decoration: underline; }
 }
 .kpi-value.positive, .stat-value.positive { color: var(--up); }
 .kpi-value.negative, .stat-value.negative { color: var(--down); }
+.kpi-value.warn, .stat-value.warn { color: var(--accent-amber); }
 .kpi-sub, .stat-sub {
   font-size: 13px;
   color: var(--sec);
@@ -1131,13 +1132,25 @@ a:hover { text-decoration: underline; }
 .xray-bar-row { display: grid; grid-template-columns: 48px 1fr 46px; align-items: center; gap: 8px; }
 .xray-bar-sym { font-size: 12px; font-weight: 700; color: var(--ink); }
 .xray-bar-track { height: 7px; background: var(--inset); border-radius: 999px; overflow: hidden; }
-.xray-bar-fill { display: block; height: 100%; background: var(--acc); border-radius: 999px; }
+.xray-bar-fill { display: block; height: 100%; background: linear-gradient(90deg, #5f8df4, var(--acc)); border-radius: 999px; }
 .xray-bar-val { font-size: 12px; font-weight: 600; color: var(--sec); text-align: right; }
 .xray-sector-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--sec); font-weight: 500; }
-.xray-flags { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.xray-flags { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* A risk flag is the one thing on this page that should stop you. It read as
+   a pale grey-red stripe; now it carries a mark and a weighted edge. */
 .xray-flags li {
-  font-size: 12.5px; font-weight: 600; line-height: 1.35; color: #b13023;
-  background: var(--down-soft, rgba(224,69,58,0.09)); border-radius: 9px; padding: 8px 11px;
+  display: flex; align-items: flex-start; gap: 10px;
+  font-size: 13px; font-weight: 600; line-height: 1.45; color: #a82a1e;
+  background: var(--down-soft, rgba(224,69,58,0.07));
+  border: 1px solid rgba(224,69,58,0.16);
+  border-left: 3px solid var(--down);
+  border-radius: 11px; padding: 11px 14px;
+}
+.xray-flags li::before {
+  content: "!"; flex: none;
+  width: 17px; height: 17px; margin-top: 1px; border-radius: 50%;
+  background: var(--down); color: #fff;
+  font-size: 11px; font-weight: 800; line-height: 17px; text-align: center;
 }
 .xray-factor-grid { display: flex; flex-wrap: wrap; gap: 6px 22px; }
 .xray-factor-cell { display: flex; flex-direction: column; gap: 1px; }
@@ -1151,11 +1164,31 @@ a:hover { text-decoration: underline; }
 .xray-page { display: flex; flex-direction: column; gap: 16px; width: 100%; }
 .xray-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .xray-titlewrap { display: flex; align-items: center; gap: 10px; }
-.xray-titlewrap h2 { margin: 0; font-size: 20px; letter-spacing: -0.01em; color: var(--ink); }
+.xray-titlewrap h2 { margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.025em; color: var(--ink); }
 /* Six stats fit one row on desktop instead of the default 4-col wrap (4+2
    orphans); zero container padding so the cards align flush with the flags
    and panels (the Overview variant keeps its own padding). */
-.stats-grid.xray-band { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); padding: 0; }
+.stats-grid.xray-band { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); padding: 0; }
+/* The headline row. It used to be six same-weight grey blocks; a tracked
+   micro-label over a tight, large value gives each card a reading order, and
+   the value carries the verdict's colour where there is one. Long words are
+   fitted to the card in JS (FitValue) — 30px "Concentrated" overflowed. */
+.stats-grid.xray-band .stat-card {
+  padding: 18px 20px 20px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stats-grid.xray-band .stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 2px 6px rgba(20, 24, 34, 0.06), 0 12px 26px rgba(20, 24, 34, 0.07);
+}
+.stats-grid.xray-band .stat-label {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--mut); margin-bottom: 12px;
+}
+/* Ellipsis is the backstop below FitValue's floor — at some width even 15px
+   type loses, and a clipped word beats one printed over the card border. */
+.stats-grid.xray-band .stat-value { letter-spacing: -0.035em; overflow: hidden; text-overflow: ellipsis; }
+.stats-grid.xray-band .stat-sub { font-size: 12px; font-weight: 600; color: var(--mut); margin-top: 9px; }
 /* Panels stretch to equal height per row — ragged bottoms read as broken.
    Fixed three-up on desktop: wider windows get richer panels, never more
    slivers (auto-fit at 1700px produced five skinny columns). */
@@ -1166,17 +1199,37 @@ a:hover { text-decoration: underline; }
 /* Main-column cards inset their content like every other panel in the app —
    flush text against a card border reads as broken. */
 .xray-grid .panel { padding: 20px 22px 22px; gap: 11px; }
+/* Panel titles carry the same accent square as the briefing reader's section
+   heads — one motif, so the panels read as a set rather than eleven boxes. */
 .xray-grid .xray-bars-title {
-  font-size: 14px;
-  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14.5px;
+  font-weight: 800;
   color: var(--ink);
   text-transform: none;
-  letter-spacing: -0.01em;
-  margin-bottom: 3px;
+  letter-spacing: -0.015em;
+  margin-bottom: 5px;
+}
+.xray-grid .xray-bars-title::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--acc);
 }
 .xray-grid .xray-mix-row, .xray-grid .xray-sector-row { font-size: 13px; }
-.xray-grid .xray-bar-sym { font-size: 13px; }
-.xray-grid .xray-bar-val { font-size: 12.5px; }
+.xray-grid .xray-bar-sym { font-size: 13.5px; font-weight: 800; }
+/* Weights are the point of these rows — give them ink and a taller track. */
+.xray-grid .xray-bar-val { font-size: 13px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.xray-grid .xray-bar-track { height: 9px; }
+.xray-grid .xray-mix-name { font-size: 13px; font-weight: 600; }
+.xray-grid .xray-factor-cell span { font-size: 19px; letter-spacing: -0.025em; }
+.xray-grid .xray-factor-cell small { text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+.xray-grid .xray-factor-grid { gap: 10px 26px; margin-top: 2px; }
+.xray-grid .xray-bench-row span:last-child { font-weight: 800; }
 .xray-grid .panel { display: flex; flex-direction: column; gap: 9px; margin: 0; }
 /* Label hugs its text, the bar takes everything left — matching the
    track-dominant geometry of the Largest-positions rows next door. A label
@@ -3019,12 +3072,32 @@ a:hover { text-decoration: underline; }
 .briefing-slide-stack strong { color: var(--ink); font-weight: 700; }
 .briefing-slide-stack ul { padding-left: 20px; margin: 4px 0; }
 
-/* Briefings — grid layout for reader + meta */
+/* Briefings — the report is the page; history is a side menu.
+   The reader holds prose, a deck, and metric cards; the history list holds
+   two-line stubs. Giving the stubs the wider column (it used to be 1.7fr)
+   made the thing you came to read the narrow one. */
 .briefing-grid {
   display: grid;
-  grid-template-columns: 1.7fr 1fr;
+  grid-template-columns: 264px minmax(0, 1fr);
   gap: 18px;
   align-items: flex-start;
+}
+/* The list scrolls inside itself and stays put while the report scrolls —
+   a long history should never push the report off the top of the window. */
+.briefing-history {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 120px);
+}
+.briefing-history .briefing-list { overflow-y: auto; min-height: 0; }
+.briefing-history .briefing-row { padding: 12px 16px; }
+.briefing-history .panel-header { padding-left: 16px; padding-right: 16px; }
+.briefing-reader { min-width: 0; }
+@media (max-width: 1100px) {
+  .briefing-grid { grid-template-columns: 1fr; }
+  .briefing-history { position: static; max-height: 340px; }
 }
 .briefing-spotlight {
   background: var(--card);

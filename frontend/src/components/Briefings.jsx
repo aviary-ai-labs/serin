@@ -468,7 +468,7 @@ export function BriefingsView({
       </div>
 
       <div className="briefing-grid">
-        <section className="panel">
+        <section className="panel briefing-history">
           <div className="panel-header">
             <h2>History</h2>
             <span className="panel-note">{briefings.length} run{briefings.length === 1 ? '' : 's'}</span>
