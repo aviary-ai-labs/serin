@@ -91,7 +91,12 @@ class Settings:
     plugins_dir: str = _env("PLUGINS_DIR", "")
     # Serin billing origin — where a license key redeems the Intelligence pack
     # download (POST /api/admin/install-pack). Empty until the user deploys it.
-    billing_url: str = _env("BILLING_URL", "")
+    # Where "Get Intelligence" checks out and a license key redeems its pack.
+    # Defaults to Serin's own billing service so a self-hoster's paste-key →
+    # install-pack flow works with zero configuration. This is NOT phoning
+    # home: nothing calls it except two explicit user actions (starting a
+    # checkout, clicking Install pack), and self-host works fully without it.
+    billing_url: str = _env("BILLING_URL", "https://serin-billing.fly.dev")
     # Set on managed Serin Cloud tenants (Dockerfile ENV). Surfaces the
     # "provided by Serin Cloud" badge on env-supplied operator keys; never set
     # on self-host.

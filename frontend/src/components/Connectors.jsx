@@ -62,6 +62,24 @@ export function ConnectorsView({ addToast, onChanged }) {
     }
   }
 
+  async function installPack() {
+    setBusy('license');
+    try {
+      const result = await api('/api/admin/install-pack', {
+        method: 'POST',
+        body: JSON.stringify({ key: licenseKey.trim() }),
+      });
+      addToast?.('success', result.restart_required
+        ? 'Intelligence pack installed — restart Serin to finish activation.'
+        : 'Intelligence pack installed.');
+      loadLicense();
+    } catch (error) {
+      addToast?.('error', `Install: ${error.message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function removeLicense() {
     setBusy('license');
     try {
@@ -295,7 +313,7 @@ export function ConnectorsView({ addToast, onChanged }) {
           <p className="license-note">Key provided via <code>SERIN_LICENSE_KEY</code> — managed in your environment.</p>
         ) : license?.active ? (
           <div className="license-actions">
-            <a className="btn btn-sm" href="/#pricing" target="_blank" rel="noreferrer">Manage plan ↗</a>
+            <a className="btn btn-sm" href="/pricing" target="_blank" rel="noreferrer">Manage plan ↗</a>
             <button className="btn btn-sm btn-ghost" disabled={busy === 'license'} onClick={removeLicense}>Remove key</button>
           </div>
         ) : (
@@ -310,9 +328,17 @@ export function ConnectorsView({ addToast, onChanged }) {
               spellCheck={false}
               autoComplete="off"
             />
-            <button className="btn btn-primary btn-sm" disabled={busy === 'license' || !licenseKey.trim()} onClick={saveLicense}>
-              {busy === 'license' ? 'Saving…' : 'Activate'}
-            </button>
+            {license?.installed ? (
+              // Key already saved, pack not loaded: the one useful action is
+              // installing — clicking redeems the stored key, no re-paste.
+              <button className="btn btn-primary btn-sm" disabled={busy === 'license'} onClick={installPack}>
+                {busy === 'license' ? 'Installing…' : 'Install pack'}
+              </button>
+            ) : (
+              <button className="btn btn-primary btn-sm" disabled={busy === 'license' || !licenseKey.trim()} onClick={saveLicense}>
+                {busy === 'license' ? 'Saving…' : 'Activate'}
+              </button>
+            )}
             {/* /pricing, not /#pricing: self-host has no landing page — the
                 route sends the buyer to the public site's pricing instead. */}
             <a className="btn btn-sm btn-ghost" href="/pricing" target="_blank" rel="noreferrer">Get a key ↗</a>
