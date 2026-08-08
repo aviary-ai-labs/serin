@@ -2847,6 +2847,8 @@ a:hover { text-decoration: underline; }
   padding: 28px 32px 0;
 }
 .briefing-cover-main { display: flex; flex-direction: column; gap: 12px; }
+.briefing-cover h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.2; margin: 0; }
+.briefing-cover-main > p { font-size: 15px; line-height: 1.6; color: var(--sec); font-weight: 500; margin: 0; }
 .briefing-kicker {
   display: inline-flex;
   align-items: center;
@@ -3071,6 +3073,40 @@ a:hover { text-decoration: underline; }
 }
 .briefing-slide-stack strong { color: var(--ink); font-weight: 700; }
 .briefing-slide-stack ul { padding-left: 20px; margin: 4px 0; }
+.briefing-slide-stack li { padding: 3px 0; }
+/* Briefing tables. Wide ones scroll inside their own box — the report column
+   must never scroll sideways. */
+.md-table-wrap { overflow-x: auto; margin: 10px 0 4px; }
+.md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+.md-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--mut);
+  padding: 0 14px 8px 0;
+  border-bottom: 1px solid var(--bd);
+  white-space: nowrap;
+}
+.md-table td {
+  padding: 9px 14px 9px 0;
+  border-bottom: 1px solid var(--bd);
+  color: var(--sec);
+  font-weight: 500;
+}
+.md-table tr:last-child td { border-bottom: none; }
+.md-table td:first-child { font-weight: 700; color: var(--ink); }
+.md-table th:not(:first-child), .md-table td:not(:first-child) { text-align: right; }
+
+/* The model's own 🔴/🟢 is the marker; ours beside it made two. */
+.markdown-body li.has-own-marker,
+.briefing-slide-stack li.has-own-marker { list-style: none; margin-left: -20px; }
 
 /* Briefings — the report is the page; history is a side menu.
    The reader holds prose, a deck, and metric cards; the history list holds
@@ -3099,12 +3135,6 @@ a:hover { text-decoration: underline; }
   .briefing-grid { grid-template-columns: 1fr; }
   .briefing-history { position: static; max-height: 340px; }
 }
-.briefing-spotlight {
-  background: var(--card);
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  box-shadow: var(--shadow-card);
-}
 .briefing-deck {
   display: flex;
   flex-direction: column;
@@ -3112,33 +3142,32 @@ a:hover { text-decoration: underline; }
 }
 .briefing-deck > .panel { padding: 0; }
 .briefing-deck > .panel > .panel-header { padding-top: 20px; }
+/* Counts belong to the cover paragraph they qualify, not to a band of their
+   own — as a separate strip they read as the report's headline numbers, which
+   they are not. Inline, sharing the cover's rule. */
 .briefing-metric-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 10px;
-  padding: 16px 28px;
-  border-bottom: 1px solid var(--bd);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--bd);
 }
 .briefing-metric {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: var(--inset);
-  border-radius: 10px;
-  padding: 10px 14px;
+  align-items: baseline;
+  gap: 7px;
 }
 .briefing-metric > span {
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--mut);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 .briefing-metric > strong {
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 800;
   color: var(--ink);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .markdown-empty {

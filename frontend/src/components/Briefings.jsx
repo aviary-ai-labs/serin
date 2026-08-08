@@ -161,26 +161,46 @@ function sectionSummary(section, fallback) {
   return text.length > 210 ? `${text.slice(0, 207).trim()}...` : text;
 }
 
+// Same words, ignoring punctuation and case — enough to catch a lead that is
+// simply the summary section repeated.
+const sameText = (a, b) => {
+  const norm = s => String(s || '').replace(/[^a-z0-9]+/gi, ' ').trim().toLowerCase();
+  const x = norm(a);
+  const y = norm(b);
+  return Boolean(x) && Boolean(y) && (x.startsWith(y.slice(0, 120)) || y.startsWith(x.slice(0, 120)));
+};
+
 function BriefingPresentation({ briefing }) {
   const parsed = useMemo(() => splitBriefingMarkdown(briefing?.output_markdown), [briefing?.output_markdown]);
   const summarySection = findSection(parsed.sections, ['summary']);
-  const portfolioSection = findSection(parsed.sections, ['portfolio', 'exposure']);
-  const marketSection = findSection(parsed.sections, ['market']);
   const watchSection = findSection(parsed.sections, ['watch', 'signal']);
   const riskSection = findSection(parsed.sections, ['risk']);
   const reviewSection = findSection(parsed.sections, ['question', 'review']);
-  const lead = sectionSummary(summarySection, briefing?.summary || parsed.intro);
-  const spotlight = [
-    { label: 'Portfolio', section: portfolioSection, tone: 'portfolio' },
-    { label: 'Market', section: marketSection, tone: 'market' },
-    { label: 'Watch', section: watchSection, tone: 'watch' },
-  ].filter(item => item.section);
+
+  // The cover already prints the summary, so a "Summary" section repeating it
+  // is the same paragraph twice, two inches apart. Only drop it when the whole
+  // section *is* that paragraph — and then print the cover's copy in full,
+  // since the tail no longer appears anywhere else.
+  const summaryBody = (summarySection?.body || '').trim();
+  const summaryIsOneParagraph =
+    Boolean(summaryBody) &&
+    !/^\s*([-*]|\d+\.)\s+/m.test(summaryBody) &&
+    summaryBody.split(/\n\s*\n/).filter(part => part.trim()).length === 1;
+  const leadFull = firstParagraph(summarySection) || briefing?.summary || parsed.intro || '';
+  const dropSummary = summaryIsOneParagraph && sameText(leadFull, summaryBody);
+  const lead = dropSummary ? leadFull : sectionSummary(summarySection, briefing?.summary || parsed.intro);
+
+  const sections = dropSummary
+    ? parsed.sections.filter(section => section !== summarySection)
+    : parsed.sections;
+
+  // Counts only where there is something to count — a row of dashes described
+  // nothing, and "Sections: 3" was never a fact about the portfolio.
   const metrics = [
-    { label: 'Sections', value: parsed.sections.length || '0' },
-    { label: 'Watch Items', value: countListItems(watchSection) || '-' },
-    { label: 'Risk Flags', value: countListItems(riskSection) || '-' },
-    { label: 'Review Items', value: countListItems(reviewSection) || '-' },
-  ];
+    { label: 'Watch items', value: countListItems(watchSection) },
+    { label: 'Risk flags', value: countListItems(riskSection) },
+    { label: 'Review items', value: countListItems(reviewSection) },
+  ].filter(metric => metric.value > 0);
 
   if (!briefing?.output_markdown) {
     return <div className="markdown-empty">Nothing to show yet.</div>;
@@ -194,30 +214,20 @@ function BriefingPresentation({ briefing }) {
           <h1>{parsed.title}</h1>
           {lead && <p>{lead}</p>}
         </div>
+        {metrics.length > 0 && (
+          <div className="briefing-metric-row" aria-label="Briefing structure">
+            {metrics.map(metric => (
+              <div className="briefing-metric" key={metric.label}>
+                <strong>{metric.value}</strong>
+                <span>{metric.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </header>
 
-      <div className="briefing-metric-row" aria-label="Briefing structure">
-        {metrics.map(metric => (
-          <div className="briefing-metric" key={metric.label}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-          </div>
-        ))}
-      </div>
-
-      {spotlight.length > 0 && (
-        <section className="briefing-spotlight" aria-label="At a glance">
-          {spotlight.map(item => (
-            <div className={`briefing-spotlight-cell tone-${item.tone}`} key={item.label}>
-              <span>{item.label}</span>
-              <p>{sectionSummary(item.section)}</p>
-            </div>
-          ))}
-        </section>
-      )}
-
       <div className="briefing-slide-stack">
-        {parsed.sections.map((section, index) => (
+        {sections.map((section, index) => (
           <section className={`briefing-slide tone-${sectionTone(section.title)}`} key={`${section.title}-${index}`}>
             <div className="briefing-slide-head">
               <span className="briefing-slide-number">{String(index + 1).padStart(2, '0')}</span>

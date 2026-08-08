@@ -99,7 +99,10 @@ export function StockChart({ symbol, assetType = 'stock', currency = 'USD', heig
           onToggleMA={() => setShowMA(v => !v)}
         />
         <div className="stock-chart-empty" style={{ height }}>
-          {error || `No price history for ${symbol} in this window.`}
+          {/* The endpoint answers 200 with an empty series and its reason in
+              `errors` — saying only "no history" left the reader to guess
+              between "new symbol" and "the provider is refusing us". */}
+          {error || data?.errors?.[0] || `No price history for ${symbol} in this window.`}
         </div>
       </div>
     );

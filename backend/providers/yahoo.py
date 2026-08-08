@@ -65,6 +65,25 @@ _HEADERS = {
 }
 
 
+def _status_message(status: int) -> str:
+    """Yahoo's failures, in words that suggest what to do about them.
+
+    An httpx repr pasted into the chart's empty state told the reader nothing
+    except that something with a URL in it went wrong. 429 in particular is
+    not a bug in the portfolio — it is the free endpoint declining to serve.
+    """
+    if status == 429:
+        return (
+            "Yahoo is rate-limiting price requests (HTTP 429). "
+            "Configure a market-data key to stop depending on it."
+        )
+    if status in (401, 403):
+        return f"Yahoo refused the request (HTTP {status})."
+    if status == 404:
+        return "Yahoo has no data for this symbol."
+    return f"Yahoo request failed (HTTP {status})."
+
+
 def _get(path: str, params: dict[str, str]) -> tuple[Any | None, str | None]:
     """GET ``path`` with host failover + light retry.
 
@@ -90,7 +109,7 @@ def _get(path: str, params: dict[str, str]) -> tuple[Any | None, str | None]:
             return response.json(), None
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
-            last_error = f"Yahoo request failed: {exc!r}"
+            last_error = _status_message(status)
             if status not in _RETRYABLE_STATUSES:
                 return None, last_error
         except httpx.TransportError as exc:
