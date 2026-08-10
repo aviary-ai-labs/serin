@@ -306,16 +306,34 @@ def verify_rls(conn: Any) -> None:
         )
 
 
+# ``GRANT … ON ALL TABLES`` binds the tables that exist when it runs, so every
+# table added after bootstrap arrives invisible to the app role. Re-granting
+# here makes re-running this step the whole fix, rather than a fix plus a
+# grant somebody has to remember.
+_REGRANT = """
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'serin_app') THEN
+    GRANT USAGE ON SCHEMA public TO serin_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO serin_app;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO serin_app;
+  END IF;
+END $$;
+"""
+
+
 def apply(conn: Any) -> None:
-    """Create the schema and lock every scoped table behind RLS.
+    """Create the schema, lock every scoped table behind RLS, re-grant.
 
     Requires table ownership, so this is a **deploy step**, not something the
     running app does — the app connects as a least-privilege role that cannot
-    (and should not) issue DDL.
+    (and should not) issue DDL. Safe to re-run: every statement is
+    create-if-absent or a repeat grant.
     """
     conn.executescript(SCHEMA)
     for table in SCOPED_TABLES:
         conn.executescript(_rls_for(table))
+    conn.executescript(_REGRANT)
 
 
 def ensure(conn: Any) -> None:
