@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -82,6 +82,43 @@ def _migration_fundamentals(conn: sqlite3.Connection) -> None:
              payload TEXT NOT NULL,
              fetched_at TEXT NOT NULL
            )"""
+    )
+
+
+def _migration_shared_quotes(conn: sqlite3.Connection) -> None:
+    """The shared quote cache and its work-list.
+
+    Both are also in the baseline for fresh databases; existing self-hosters
+    are at version 6 and never replay it, so they arrive here instead.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS quotes (
+             symbol TEXT NOT NULL,
+             asset_type TEXT NOT NULL DEFAULT 'stock',
+             price REAL NOT NULL,
+             sector TEXT NOT NULL DEFAULT '',
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY (symbol, asset_type)
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS tracked_symbols (
+             symbol TEXT NOT NULL,
+             asset_type TEXT NOT NULL DEFAULT 'stock',
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY (symbol, asset_type)
+           )"""
+    )
+    # Seed the work-list from what this database already holds. Safe here and
+    # nowhere else: a migration runs before any request, on one deployment's
+    # own file, so there is no tenant boundary to cross.
+    conn.execute(
+        """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
+           SELECT DISTINCT UPPER(symbol), asset_type, ?
+             FROM positions
+            WHERE asset_type NOT IN ('cash', 'option')
+           ON CONFLICT(symbol, asset_type) DO NOTHING""",
+        (utcnow_iso(),),
     )
 
 
@@ -201,6 +238,7 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (4, "positions.currency", _migration_position_currency),
     (5, "fundamentals cache", _migration_fundamentals),
     (6, "per-user scoping (user_id + composite uniqueness)", _migration_user_scope),
+    (7, "shared quote cache + tracked symbols", _migration_shared_quotes),
 ]
 
 
@@ -352,6 +390,31 @@ def _create_baseline_schema(conn: sqlite3.Connection) -> None:
               rate REAL NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            -- v0.9: shared quote cache. Prices used to be fetched per user and
+            -- written onto their position rows, so a hundred people holding
+            -- AAPL bought the same number a hundred times. Un-scoped for the
+            -- same reason price_history is: one fetch serves everyone.
+            CREATE TABLE IF NOT EXISTS quotes (
+              symbol TEXT NOT NULL,
+              asset_type TEXT NOT NULL DEFAULT 'stock',
+              price REAL NOT NULL,
+              sector TEXT NOT NULL DEFAULT '',
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (symbol, asset_type)
+            );
+
+            -- The set of symbols anyone holds, so one deployment-wide refresh
+            -- knows what to fetch. Symbols only — no owner, no quantity — so
+            -- it answers "what to price" without crossing the tenant boundary
+            -- (Postgres RLS would refuse a cross-user read of positions, and
+            -- rightly).
+            CREATE TABLE IF NOT EXISTS tracked_symbols (
+              symbol TEXT NOT NULL,
+              asset_type TEXT NOT NULL DEFAULT 'stock',
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (symbol, asset_type)
+            );
             """
     )
 
@@ -476,6 +539,7 @@ def create_position(position: PositionIn) -> Position:
                 now,
             ),
         )
+        _track_on(conn, position.symbol, position.asset_type)
     return _derive(position, position_id, now)
 
 
@@ -508,6 +572,7 @@ def upsert_position(position: PositionIn) -> Position:
                 now,
             ),
         )
+        _track_on(conn, position.symbol, position.asset_type)
         row = conn.execute(
             """SELECT * FROM positions
                WHERE user_id=? AND symbol=? AND broker=? AND asset_type=?""",
@@ -541,6 +606,7 @@ def update_position(position_id: int, position: PositionIn) -> Position | None:
         )
         if cur.rowcount == 0:
             return None
+        _track_on(conn, position.symbol, position.asset_type)
     return get_position(position_id)
 
 
@@ -597,6 +663,113 @@ def cache_price_history(history: dict[str, dict]) -> int:
                 )
                 written += 1
     return written
+
+
+# --- shared quote cache -----------------------------------------------------
+# Quotes are the same number for everyone who holds the symbol, so they are
+# fetched once per deployment rather than once per user. See the `quotes` and
+# `tracked_symbols` DDL for why neither table carries a user_id.
+
+
+def _track_on(conn, symbol: str, asset_type: str) -> None:
+    """Add one symbol to the work-list, inside the caller's transaction.
+
+    Every position write goes through here, so a symbol becomes priceable the
+    moment someone holds it rather than at the next full scan.
+    """
+    symbol = (symbol or "").strip().upper()
+    asset_type = (asset_type or "stock").strip().lower()
+    if not symbol or asset_type in ("cash", "option"):
+        return
+    conn.execute(
+        """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(symbol, asset_type)
+           DO UPDATE SET updated_at=excluded.updated_at""",
+        (symbol, asset_type, utcnow_iso()),
+    )
+
+
+def track_symbols(pairs: Iterable[tuple[str, str]]) -> int:
+    """Record ``(symbol, asset_type)`` pairs the deployment needs priced.
+
+    Called from every position write, so the refresher's work-list stays
+    current without ever reading across users. Cash and options are skipped —
+    nothing to quote.
+    """
+    now = utcnow_iso()
+    written = 0
+    with connect() as conn:
+        for symbol, asset_type in pairs:
+            symbol = (symbol or "").strip().upper()
+            asset_type = (asset_type or "stock").strip().lower()
+            if not symbol or asset_type in ("cash", "option"):
+                continue
+            conn.execute(
+                """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(symbol, asset_type)
+                   DO UPDATE SET updated_at=excluded.updated_at""",
+                (symbol, asset_type, now),
+            )
+            written += 1
+    return written
+
+
+def list_tracked_symbols() -> list[tuple[str, str]]:
+    """Every ``(symbol, asset_type)`` the deployment prices, for anyone."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT symbol, asset_type FROM tracked_symbols ORDER BY symbol, asset_type"
+        ).fetchall()
+    return [(row["symbol"], row["asset_type"]) for row in rows]
+
+
+def cache_quotes(rows: Iterable[tuple[str, str, float, str]]) -> int:
+    """Upsert ``(symbol, asset_type, price, sector)`` quotes into the shared cache."""
+    now = utcnow_iso()
+    written = 0
+    with connect() as conn:
+        for symbol, asset_type, price, sector in rows:
+            if price is None or float(price) <= 0:
+                continue
+            conn.execute(
+                """INSERT INTO quotes (symbol, asset_type, price, sector, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol, asset_type) DO UPDATE SET
+                     price=excluded.price,
+                     sector=CASE WHEN excluded.sector <> '' THEN excluded.sector ELSE quotes.sector END,
+                     updated_at=excluded.updated_at""",
+                (symbol.strip().upper(), (asset_type or "stock").strip().lower(), float(price), sector or "", now),
+            )
+            written += 1
+    return written
+
+
+def get_cached_quotes(
+    pairs: Iterable[tuple[str, str]] | None = None,
+) -> dict[tuple[str, str], tuple[float, str, str]]:
+    """``{(symbol, asset_type): (price, sector, updated_at)}`` from the cache.
+
+    ``pairs`` filters to what a caller cares about; omit it for everything.
+    Freshness is the caller's decision — the scheduler refetches regardless,
+    a user-triggered refresh honours a window.
+    """
+    wanted = list(pairs) if pairs is not None else None
+    if wanted is not None and not wanted:
+        return {}
+    sql = "SELECT symbol, asset_type, price, sector, updated_at FROM quotes"
+    params: list[str] = []
+    if wanted is not None:
+        placeholders = ",".join("?" for _ in wanted)
+        sql += f" WHERE symbol IN ({placeholders})"
+        params = [symbol.strip().upper() for symbol, _ in wanted]
+    with connect() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return {
+        (row["symbol"], row["asset_type"]): (row["price"], row["sector"], row["updated_at"])
+        for row in rows
+    }
 
 
 def cached_history_bounds(symbols: list[str]) -> dict[str, dict[str, str]]:
@@ -748,6 +921,7 @@ def replace_synced_positions(
                 ),
             )
             seen.add((position.symbol, position.broker, position.asset_type))
+            _track_on(conn, position.symbol, position.asset_type)
 
         removed = 0
         if brokers:

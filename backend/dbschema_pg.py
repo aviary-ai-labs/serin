@@ -141,6 +141,24 @@ CREATE TABLE IF NOT EXISTS fx_rates (
   rate DOUBLE PRECISION NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS quotes (
+  symbol TEXT NOT NULL,
+  asset_type TEXT NOT NULL DEFAULT 'stock',
+  price DOUBLE PRECISION NOT NULL,
+  sector TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (symbol, asset_type)
+);
+
+-- Symbols only: what to price, never who holds it. Deliberately outside RLS
+-- so one refresh can serve every user without reading anyone's positions.
+CREATE TABLE IF NOT EXISTS tracked_symbols (
+  symbol TEXT NOT NULL,
+  asset_type TEXT NOT NULL DEFAULT 'stock',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (symbol, asset_type)
+);
 """
 
 

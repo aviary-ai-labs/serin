@@ -294,8 +294,10 @@ def test_existing_database_upgrades_without_losing_data(tmp_path):
     finally:
         db.MIGRATIONS = original
 
-    db.init_db()  # applies migration 6
-    assert db.schema_version() == 6
+    db.init_db()  # applies every pending migration
+    # The head, not a literal — this test is about surviving the upgrade, and
+    # pinning a number here just breaks on the next migration.
+    assert db.schema_version() == max(version for version, _, _ in db.MIGRATIONS)
 
     # Everything survived, and belongs to the single local owner.
     assert [p.symbol for p in db.list_positions()] == ["AAPL"]

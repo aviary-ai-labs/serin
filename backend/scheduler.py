@@ -32,6 +32,10 @@ from backend.models import Briefing
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_SECONDS = 30
+# How often the deployment-wide quote sweep runs. Matches the freshness window
+# a user-triggered refresh honours, so the cache is normally warm enough that
+# nobody's refresh reaches a provider at all.
+QUOTE_SWEEP_SECONDS = 900
 MAX_ATTEMPTS_PER_DAY = 3
 RETRY_DELAY = timedelta(minutes=10)
 
@@ -276,9 +280,36 @@ async def check_once(now_utc: datetime | None = None) -> bool:
     return True
 
 
+_last_quote_sweep: datetime | None = None
+
+
+async def maybe_refresh_tracked_quotes() -> None:
+    """Price every held symbol once, for the whole deployment.
+
+    Deliberately outside the per-user loop: quotes are the same number for
+    everyone holding the symbol, so this is what keeps the market-data bill
+    proportional to symbols rather than to customers. Never raises.
+    """
+    global _last_quote_sweep
+    now = datetime.now(UTC)
+    if _last_quote_sweep and (now - _last_quote_sweep).total_seconds() < QUOTE_SWEEP_SECONDS:
+        return
+    _last_quote_sweep = now
+    try:
+        from backend.prices import refresh_tracked_quotes
+
+        with scope.using(scope.INSTANCE_SCOPE):
+            result = await asyncio.to_thread(refresh_tracked_quotes)
+        if result.get("errors"):
+            logger.warning("Quote sweep finished with errors: %s", result["errors"][:3])
+    except Exception:
+        logger.warning("Shared quote sweep failed; users fall back to their own fetches", exc_info=True)
+
+
 async def scheduler_loop() -> None:
     logger.info("Briefing scheduler started (checking every %ss)", CHECK_INTERVAL_SECONDS)
     while True:
+        await maybe_refresh_tracked_quotes()
         try:
             # Briefings are per-user: one schedule and one portfolio each. On
             # self-host this is a single pass; with accounts it visits everyone.

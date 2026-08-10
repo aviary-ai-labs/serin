@@ -51,24 +51,19 @@ def _no_provider_result(**extra) -> dict:
     }
 
 
-def refresh_prices(symbols: set[str] | None = None) -> dict:
-    """Refresh quotes for all priceable positions.
+# How long a cached quote serves a user-triggered refresh before we go back to
+# the provider. The point of the shared cache is that a hundred people holding
+# AAPL cost one call, not a hundred — which only holds if a refresh is willing
+# to answer from cache. The scheduled deployment-wide pass ignores this and
+# always fetches.
+QUOTE_FRESH_SECONDS = 900
 
-    Crypto positions route through the crypto-specialist layer (CoinGecko)
-    when one is enabled; everything else goes to the main provider.
-    """
-    positions = [
-        position for position in db.list_positions()
-        if position.asset_type not in ("cash", "option")
-    ]
-    if symbols is not None:
-        wanted = {s.upper() for s in symbols}
-        positions = [position for position in positions if position.symbol in wanted]
 
+def _fetch_quotes(positions: list[Position]) -> tuple[dict[str, tuple[float, str]], list[str], str]:
+    """Ask the providers for these positions' prices. Crypto routes to the
+    crypto specialist (CoinGecko) when one is enabled; the rest to the main
+    market-data connector."""
     provider_name = connectors.active_market_data_id()
-    if not positions:
-        return {"provider": provider_name, "updated": 0, "symbols": [], "errors": []}
-
     crypto_connector = connectors.active_crypto_data()
     crypto = [p for p in positions if p.asset_type == "crypto"] if crypto_connector else []
     main = [p for p in positions if p not in crypto]
@@ -80,7 +75,7 @@ def refresh_prices(symbols: set[str] | None = None) -> dict:
         connector = connectors.active_market_data()
         if connector is None:
             if not crypto:
-                return _no_provider_result()
+                return {}, [], "none"
             errors.append("No main market-data provider — only crypto refreshed via CoinGecko")
         else:
             result = connector.refresh_prices(main)
@@ -93,13 +88,113 @@ def refresh_prices(symbols: set[str] | None = None) -> dict:
         errors.extend(result.get("errors", []))
         provider_name = f"{provider_name}+coingecko" if main else "coingecko"
 
+    return prices, errors, provider_name
+
+
+def _is_fresh(updated_at: str, within_seconds: int) -> bool:
+    try:
+        stamp = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - stamp).total_seconds() < within_seconds
+
+
+def refresh_prices(symbols: set[str] | None = None, max_age_seconds: int | None = None) -> dict:
+    """Bring this user's position prices up to date.
+
+    Reads the shared quote cache first and only asks a provider for symbols
+    nobody has priced recently — so on a shared deployment the provider bill
+    tracks the number of distinct symbols held, not the number of customers
+    holding them. ``max_age_seconds=0`` forces a fetch (the scheduler's
+    deployment-wide pass).
+    """
+    positions = [
+        position for position in db.list_positions()
+        if position.asset_type not in ("cash", "option")
+    ]
+    if symbols is not None:
+        wanted = {s.upper() for s in symbols}
+        positions = [position for position in positions if position.symbol in wanted]
+
+    provider_name = connectors.active_market_data_id()
+    if not positions:
+        return {"provider": provider_name, "updated": 0, "symbols": [], "errors": [], "cached": 0}
+
+    # Positions written before the work-list existed are absent from it. Every
+    # refresh re-declares what this user holds, so the universe backfills
+    # itself rather than needing a cross-user scan nobody is allowed to run.
+    db.track_symbols((p.symbol, p.asset_type) for p in positions)
+
+    window = QUOTE_FRESH_SECONDS if max_age_seconds is None else max_age_seconds
+    cached = db.get_cached_quotes((p.symbol, p.asset_type) for p in positions)
+
+    prices: dict[str, tuple[float, str]] = {}
+    stale: list[Position] = []
+    for position in positions:
+        entry = cached.get((position.symbol, position.asset_type))
+        if entry and window > 0 and _is_fresh(entry[2], window):
+            prices[position.symbol] = (entry[0], entry[1])
+        else:
+            stale.append(position)
+    served_from_cache = len(prices)
+
+    errors: list[str] = []
+    if stale:
+        fetched, errors, provider_name = _fetch_quotes(stale)
+        if provider_name == "none":
+            # No provider is only fatal when the cache has nothing either;
+            # otherwise a warm cache is exactly what should carry the request.
+            if not prices:
+                return _no_provider_result(cached=0)
+            errors = list(errors) + _no_provider_result()["errors"]
+            provider_name = "cache"
+            fetched = {}
+        by_type = {p.symbol: p.asset_type for p in stale}
+        db.cache_quotes(
+            (symbol, by_type.get(symbol, "stock"), price, sector)
+            for symbol, (price, sector) in fetched.items()
+        )
+        prices.update(fetched)
+
     updated = db.update_prices(prices)
     return {
         "provider": provider_name,
         "updated": updated,
         "symbols": sorted(prices),
         "errors": errors,
+        "cached": served_from_cache,
     }
+
+
+def refresh_tracked_quotes() -> dict:
+    """Price every symbol the deployment holds, once, into the shared cache.
+
+    This is the whole point of the cache: one pass over the union of symbols,
+    regardless of how many people hold them. Runs on the scheduler; individual
+    refreshes then read what it wrote.
+    """
+    tracked = db.list_tracked_symbols()
+    if not tracked:
+        return {"provider": connectors.active_market_data_id(), "symbols": 0, "errors": []}
+
+    # The providers take positions; the cache only knows symbols. Stand-ins
+    # carry the two fields any provider reads: symbol and asset_type.
+    stand_ins = [
+        Position(id=0, symbol=symbol, name=symbol, broker="", asset_type=asset_type, quantity=0.0)
+        for symbol, asset_type in tracked
+    ]
+    prices, errors, provider_name = _fetch_quotes(stand_ins)
+    if provider_name == "none":
+        return {"provider": "none", "symbols": 0, "errors": _no_provider_result()["errors"]}
+
+    by_type = dict(tracked)
+    written = db.cache_quotes(
+        (symbol, by_type.get(symbol, "stock"), price, sector)
+        for symbol, (price, sector) in prices.items()
+    )
+    return {"provider": provider_name, "symbols": written, "errors": errors}
 
 
 # Cached daily closes count as fresh if the newest point is within this many
