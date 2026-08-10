@@ -58,7 +58,7 @@ class SnapTradeConnector(HoldingsConnector):
         try:
             return snaptrade.status()
         except Exception as exc:
-            return {"configured": snaptrade.snaptrade_available(), "error": str(exc)}
+            return {"configured": snaptrade.snaptrade_available(), "error": snaptrade.error_message(exc)}
 
     def sync(self) -> dict:
         return snaptrade.sync()
@@ -72,7 +72,7 @@ class SnapTradeConnector(HoldingsConnector):
         try:
             status = snaptrade.status()
         except Exception as exc:
-            return TestResult(ok=False, message=f"SnapTrade error: {exc}")
+            return TestResult(ok=False, message=snaptrade.error_message(exc))
         connections = status.get("connections") or []
         if connections:
             return TestResult(ok=True, message=f"{len(connections)} brokerage connection(s) linked.")

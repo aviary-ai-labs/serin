@@ -714,7 +714,7 @@ async def api_broker_connect(body: ConnectRequest | None = None):
     try:
         url = await asyncio.to_thread(snaptrade.connection_portal_url, body.redirect if body else None)
     except Exception as exc:
-        raise HTTPException(502, f"SnapTrade connect failed: {exc}") from exc
+        raise HTTPException(502, snaptrade.error_message(exc)) from exc
     return {"redirect_uri": url}
 
 
@@ -727,7 +727,7 @@ async def api_broker_sync():
     except snaptrade.SnapTradeError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(502, f"SnapTrade sync failed: {exc}") from exc
+        raise HTTPException(502, snaptrade.error_message(exc)) from exc
 
 
 @app.delete("/api/broker/connections/{authorization_id}")
@@ -737,7 +737,7 @@ async def api_broker_disconnect(authorization_id: str):
     try:
         removed = await asyncio.to_thread(snaptrade.disconnect, authorization_id)
     except Exception as exc:
-        raise HTTPException(502, f"SnapTrade disconnect failed: {exc}") from exc
+        raise HTTPException(502, snaptrade.error_message(exc)) from exc
     return {"ok": True, "removed_positions": removed}
 
 

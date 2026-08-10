@@ -295,3 +295,45 @@ def test_connect_endpoint_503_when_unconfigured(monkeypatch, fresh_db):
     monkeypatch.setattr(settings, "snaptrade_client_id", "")
     client = TestClient(app)
     assert client.post("/api/broker/connect", json={}).status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Error surfacing
+
+
+class _FakeApiException(Exception):
+    """Shaped like snaptrade_client.exceptions.ApiException: str() is the whole
+    HTTP exchange, and the useful sentence is buried in .body."""
+
+    def __init__(self, status, body, headers):
+        self.status = status
+        self.body = body
+        self.headers = headers
+        super().__init__(f"({status})\nReason: Forbidden\nHTTP response headers: {headers}\nHTTP response body: {body}")
+
+
+def test_rejected_credentials_read_as_a_credentials_problem():
+    exc = _FakeApiException(
+        403,
+        {"detail": "Authentication credentials were not provided.", "status_code": 403},
+        {"X-RateLimit-Limit": "250", "X-Request-ID": "491d4ea"},
+    )
+    message = snaptrade.error_message(exc)
+    assert "credentials" in message.lower()
+    assert "SnapTrade dashboard" in message
+    # None of the transcript leaks through
+    assert "X-RateLimit" not in message
+    assert "X-Request-ID" not in message
+    assert "\n" not in message
+
+
+def test_transient_and_unknown_failures_stay_one_line():
+    assert "try again" in snaptrade.error_message(_FakeApiException(503, {}, {})).lower()
+    assert "rate-limiting" in snaptrade.error_message(_FakeApiException(429, {}, {})).lower()
+    plain = snaptrade.error_message(RuntimeError("socket exploded\nstack line\nstack line"))
+    assert plain == "socket exploded"
+
+
+def test_json_string_bodies_are_parsed_too():
+    exc = _FakeApiException(418, '{"detail": "I am a teapot"}', {})
+    assert snaptrade.error_message(exc) == "SnapTrade returned HTTP 418: I am a teapot"

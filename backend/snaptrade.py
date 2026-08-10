@@ -63,6 +63,50 @@ def snaptrade_available() -> bool:
     return bool(client_id and consumer_key)
 
 
+def error_message(exc: Exception) -> str:
+    """A SnapTrade failure in one line someone can act on.
+
+    The SDK's ApiException stringifies to the entire HTTP exchange — status,
+    every response header, then the body. Surfaced in the UI that fills the
+    screen with rate-limit headers and a request id, burying the one sentence
+    that says what to do. Keep the sentence, drop the transcript.
+    """
+    status = getattr(exc, "status", None)
+    detail = ""
+    body = getattr(exc, "body", None)
+    if body is not None:
+        if isinstance(body, bytes | bytearray):
+            try:
+                body = body.decode()
+            except Exception:
+                body = ""
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except ValueError:
+                detail = body.strip()[:200]
+        if isinstance(body, dict):
+            detail = str(body.get("detail") or body.get("message") or "").strip()
+
+    if status in (401, 403):
+        # Both credentials are sent on every call, so "not provided" upstream
+        # means "not accepted" — say the actionable thing, not the literal one.
+        return (
+            "SnapTrade rejected Serin's credentials. Check the Client ID and "
+            "Consumer Key against your SnapTrade dashboard — a key for the "
+            "wrong environment, or a revoked one, fails exactly like this."
+        )
+    if status == 429:
+        return "SnapTrade is rate-limiting requests. Wait a moment and try again."
+    if status and 500 <= int(status) < 600:
+        return f"SnapTrade is having trouble (HTTP {status}). Usually transient — try again."
+    if status:
+        return f"SnapTrade returned HTTP {status}{f': {detail}' if detail else '.'}"
+    if isinstance(exc, SnapTradeError):
+        return str(exc)
+    return (str(exc).splitlines() or [""])[0][:200] or "SnapTrade request failed."
+
+
 def _get_client():
     global _client, _client_creds
     client_id, consumer_key = resolved_credentials()
