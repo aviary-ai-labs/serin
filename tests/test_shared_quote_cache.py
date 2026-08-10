@@ -167,3 +167,27 @@ def test_an_existing_database_gains_the_cache_on_upgrade(tmp_path):
     assert ("AAPL", "stock") in tracked          # seeded from existing holdings
     assert not [pair for pair in tracked if pair[0] == "USD"]
     assert db.get_cached_quotes() == {}          # empty, but present
+
+
+def test_missing_tables_degrade_to_the_old_behaviour(fresh_db, fmp, caplog):
+    """Postgres upgrades code before an operator runs the DDL step — the app
+    role has no CREATE rights, by design. Until then the cache must cost
+    speed, not function."""
+    import sqlite3
+
+    _hold("AAPL")
+    with sqlite3.connect(db.DB_PATH) as raw:
+        raw.execute("DROP TABLE quotes")
+        raw.execute("DROP TABLE tracked_symbols")
+        raw.commit()
+
+    # Positions still save — the tracking write must not roll back a holding.
+    _hold("MSFT")
+    assert {p.symbol for p in db.list_positions()} == {"AAPL", "MSFT"}
+
+    # And pricing still works, by going to the provider every time.
+    result = prices.refresh_prices()
+    assert result["cached"] == 0
+    assert result["updated"] == 2
+    assert sorted(fmp) == ["AAPL", "MSFT"]
+    assert db.list_tracked_symbols() == []

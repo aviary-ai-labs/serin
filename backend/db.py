@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -23,6 +24,8 @@ from backend.models import (
     TransactionIn,
     utcnow_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 DB_PATH: Path = settings.db_path
 
@@ -670,6 +673,34 @@ def cache_price_history(history: dict[str, dict]) -> int:
 # fetched once per deployment rather than once per user. See the `quotes` and
 # `tracked_symbols` DDL for why neither table carries a user_id.
 
+_cache_warned = False
+
+
+def _absent_table(exc: Exception) -> bool:
+    """Whether ``exc`` is just "those tables aren't there yet".
+
+    SQLite self-hosters get them from migration 7 at startup. Postgres does
+    not: the app role has no DDL rights by design, so a shared deployment runs
+    new code for however long it takes an operator to run
+    ``python -m backend.dbschema_pg``. The cache is an optimisation — missing
+    it has to cost speed, never function.
+    """
+    if type(exc).__name__ == "UndefinedTable":  # psycopg, without importing it
+        return True
+    return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc).lower()
+
+
+def _warn_cache_absent(exc: Exception) -> None:
+    global _cache_warned
+    if not _cache_warned:
+        _cache_warned = True
+        logger.warning(
+            "Shared quote cache tables are missing (%s) — pricing falls back to "
+            "per-user fetches. Run `python -m backend.dbschema_pg` as the database "
+            "owner to enable it.",
+            exc,
+        )
+
 
 def _track_on(conn, symbol: str, asset_type: str) -> None:
     """Add one symbol to the work-list, inside the caller's transaction.
@@ -681,13 +712,20 @@ def _track_on(conn, symbol: str, asset_type: str) -> None:
     asset_type = (asset_type or "stock").strip().lower()
     if not symbol or asset_type in ("cash", "option"):
         return
-    conn.execute(
-        """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(symbol, asset_type)
-           DO UPDATE SET updated_at=excluded.updated_at""",
-        (symbol, asset_type, utcnow_iso()),
-    )
+    try:
+        conn.execute(
+            """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(symbol, asset_type)
+               DO UPDATE SET updated_at=excluded.updated_at""",
+            (symbol, asset_type, utcnow_iso()),
+        )
+    except Exception as exc:
+        # This runs inside the caller's position write. Letting it raise would
+        # roll back someone's holding to protect a cache.
+        if not _absent_table(exc):
+            raise
+        _warn_cache_absent(exc)
 
 
 def track_symbols(pairs: Iterable[tuple[str, str]]) -> int:
@@ -699,29 +737,41 @@ def track_symbols(pairs: Iterable[tuple[str, str]]) -> int:
     """
     now = utcnow_iso()
     written = 0
-    with connect() as conn:
-        for symbol, asset_type in pairs:
-            symbol = (symbol or "").strip().upper()
-            asset_type = (asset_type or "stock").strip().lower()
-            if not symbol or asset_type in ("cash", "option"):
-                continue
-            conn.execute(
-                """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(symbol, asset_type)
-                   DO UPDATE SET updated_at=excluded.updated_at""",
-                (symbol, asset_type, now),
-            )
-            written += 1
+    try:
+        with connect() as conn:
+            for symbol, asset_type in pairs:
+                symbol = (symbol or "").strip().upper()
+                asset_type = (asset_type or "stock").strip().lower()
+                if not symbol or asset_type in ("cash", "option"):
+                    continue
+                conn.execute(
+                    """INSERT INTO tracked_symbols (symbol, asset_type, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(symbol, asset_type)
+                       DO UPDATE SET updated_at=excluded.updated_at""",
+                    (symbol, asset_type, now),
+                )
+                written += 1
+    except Exception as exc:
+        if not _absent_table(exc):
+            raise
+        _warn_cache_absent(exc)
+        return 0
     return written
 
 
 def list_tracked_symbols() -> list[tuple[str, str]]:
     """Every ``(symbol, asset_type)`` the deployment prices, for anyone."""
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT symbol, asset_type FROM tracked_symbols ORDER BY symbol, asset_type"
-        ).fetchall()
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol, asset_type FROM tracked_symbols ORDER BY symbol, asset_type"
+            ).fetchall()
+    except Exception as exc:
+        if not _absent_table(exc):
+            raise
+        _warn_cache_absent(exc)
+        return []
     return [(row["symbol"], row["asset_type"]) for row in rows]
 
 
@@ -729,20 +779,32 @@ def cache_quotes(rows: Iterable[tuple[str, str, float, str]]) -> int:
     """Upsert ``(symbol, asset_type, price, sector)`` quotes into the shared cache."""
     now = utcnow_iso()
     written = 0
-    with connect() as conn:
-        for symbol, asset_type, price, sector in rows:
-            if price is None or float(price) <= 0:
-                continue
-            conn.execute(
-                """INSERT INTO quotes (symbol, asset_type, price, sector, updated_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(symbol, asset_type) DO UPDATE SET
-                     price=excluded.price,
-                     sector=CASE WHEN excluded.sector <> '' THEN excluded.sector ELSE quotes.sector END,
-                     updated_at=excluded.updated_at""",
-                (symbol.strip().upper(), (asset_type or "stock").strip().lower(), float(price), sector or "", now),
-            )
-            written += 1
+    try:
+        with connect() as conn:
+            for symbol, asset_type, price, sector in rows:
+                if price is None or float(price) <= 0:
+                    continue
+                conn.execute(
+                    """INSERT INTO quotes (symbol, asset_type, price, sector, updated_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(symbol, asset_type) DO UPDATE SET
+                         price=excluded.price,
+                         sector=CASE WHEN excluded.sector <> '' THEN excluded.sector ELSE quotes.sector END,
+                         updated_at=excluded.updated_at""",
+                    (
+                        symbol.strip().upper(),
+                        (asset_type or "stock").strip().lower(),
+                        float(price),
+                        sector or "",
+                        now,
+                    ),
+                )
+                written += 1
+    except Exception as exc:
+        if not _absent_table(exc):
+            raise
+        _warn_cache_absent(exc)
+        return 0
     return written
 
 
@@ -764,8 +826,14 @@ def get_cached_quotes(
         placeholders = ",".join("?" for _ in wanted)
         sql += f" WHERE symbol IN ({placeholders})"
         params = [symbol.strip().upper() for symbol, _ in wanted]
-    with connect() as conn:
-        rows = conn.execute(sql, tuple(params)).fetchall()
+    try:
+        with connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+    except Exception as exc:
+        if not _absent_table(exc):
+            raise
+        _warn_cache_absent(exc)
+        return {}  # every symbol reads as a miss; callers fetch as they used to
     return {
         (row["symbol"], row["asset_type"]): (row["price"], row["sector"], row["updated_at"])
         for row in rows
