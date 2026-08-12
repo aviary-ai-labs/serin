@@ -231,14 +231,14 @@ def test_history_sweep_tops_up_and_then_stands_down(fresh_db, monkeypatch):
 
     monkeypatch.setattr(settings, "market_data_provider", "fmp")
     monkeypatch.setattr(settings, "fmp_api_key", "test-key")
-    history_calls: list[str] = []
+    history_calls: list[tuple[str, str]] = []
     today = datetime.now(UTC).date()
 
     def fake_get(path, params, *args, **kwargs):
         if path == "stable/profile":
             return [{"price": 212.5, "sector": "Technology"}], None
         if path == "stable/historical-price-eod/light":
-            history_calls.append(params["symbol"])
+            history_calls.append((params["symbol"], params.get("from", "")))
             days = [today - timedelta(days=n) for n in range(3, -1, -1)]
             return [{"date": d.isoformat(), "close": 100.0 + n} for n, d in enumerate(days)], None
         raise AssertionError(path)
@@ -250,7 +250,11 @@ def test_history_sweep_tops_up_and_then_stands_down(fresh_db, monkeypatch):
         first = prices.refresh_tracked_history()
         again = prices.refresh_tracked_history()
 
-    assert history_calls == ["AAPL"]          # one call, once
+    assert [sym for sym, _ in history_calls] == ["AAPL"]  # one call, once
+    # ...and that one bootstrap call asks for full depth, not a year — the
+    # provider charges the same either way.
+    bootstrap_from = history_calls[0][1]
+    assert bootstrap_from <= (today - timedelta(days=365 * 5)).isoformat()
     assert first["symbols"] == 1
     assert again["skipped"] == 1              # today's close is already cached
     cached = db.get_cached_price_history(["AAPL"])["AAPL"]

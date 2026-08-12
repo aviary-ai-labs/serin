@@ -260,7 +260,12 @@ def refresh_tracked_history() -> dict:
         if span and span["latest"] >= today:
             skipped += 1  # already has today's close (e.g. a restart re-ran the sweep)
             continue
-        result = fetch_symbol_history(symbol, asset_type, period="1y", force=True)
+        # A symbol's first pull takes full depth: the provider charges one
+        # call per request regardless of window, and the MAX chart view needs
+        # more than a year. Crypto stays at 1y — CoinGecko's free history
+        # stops there. After bootstrap, the incremental tail takes over.
+        period = "1y" if (span or asset_type == "crypto") else "max"
+        result = fetch_symbol_history(symbol, asset_type, period=period, force=True)
         if result.get("dates"):
             topped_up += 1
         errors.extend(
