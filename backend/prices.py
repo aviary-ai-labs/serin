@@ -263,7 +263,10 @@ def refresh_tracked_history() -> dict:
         result = fetch_symbol_history(symbol, asset_type, period="1y", force=True)
         if result.get("dates"):
             topped_up += 1
-        errors.extend(f"{symbol}: {err}" for err in result.get("errors", []))
+        errors.extend(
+            err if err.startswith(f"{symbol}:") else f"{symbol}: {err}"
+            for err in result.get("errors", [])
+        )
     return {"provider": provider_name, "symbols": topped_up, "skipped": skipped, "errors": errors}
 
 
