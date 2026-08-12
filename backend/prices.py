@@ -168,33 +168,103 @@ def refresh_prices(symbols: set[str] | None = None, max_age_seconds: int | None 
     }
 
 
+def _us_equity_market_open(now: datetime | None = None) -> bool:
+    """Roughly whether US equities are trading (9:15–16:15 ET, Mon–Fri).
+
+    The buffer takes the open/close auctions; holidays are deliberately not
+    modelled — a sweep on a closed Monday just re-reads unchanged prices,
+    which costs a little and breaks nothing. Getting this wrong the other way
+    (tz data missing → claim closed) would freeze prices, so absent tzdata we
+    claim open.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        now_et = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return True
+    if now_et.weekday() >= 5:
+        return False
+    minutes = now_et.hour * 60 + now_et.minute
+    return (9 * 60 + 15) <= minutes <= (16 * 60 + 15)
+
+
 def refresh_tracked_quotes() -> dict:
     """Price every symbol the deployment holds, once, into the shared cache.
 
     This is the whole point of the cache: one pass over the union of symbols,
     regardless of how many people hold them. Runs on the scheduler; individual
     refreshes then read what it wrote.
+
+    Off-hours, stock quotes cannot change, so sweeping them would spend the
+    provider's daily budget on re-reading Friday's close all weekend — they
+    are skipped unless never priced at all (a symbol added on Sunday still
+    deserves its first number). Crypto trades around the clock and is priced
+    by its own free provider, so it always sweeps.
     """
     tracked = db.list_tracked_symbols()
     if not tracked:
-        return {"provider": connectors.active_market_data_id(), "symbols": 0, "errors": []}
+        return {"provider": connectors.active_market_data_id(), "symbols": 0, "skipped": 0, "errors": []}
+
+    cached = db.get_cached_quotes(tracked)
+    market_open = _us_equity_market_open()
+    work = [
+        (symbol, asset_type)
+        for symbol, asset_type in tracked
+        if asset_type == "crypto" or market_open or (symbol, asset_type) not in cached
+    ]
+    skipped = len(tracked) - len(work)
+    if not work:
+        return {"provider": connectors.active_market_data_id(), "symbols": 0, "skipped": skipped, "errors": []}
 
     # The providers take positions; the cache only knows symbols. Stand-ins
     # carry the two fields any provider reads: symbol and asset_type.
     stand_ins = [
         Position(id=0, symbol=symbol, name=symbol, broker="", asset_type=asset_type, quantity=0.0)
-        for symbol, asset_type in tracked
+        for symbol, asset_type in work
     ]
     prices, errors, provider_name = _fetch_quotes(stand_ins)
     if provider_name == "none":
-        return {"provider": "none", "symbols": 0, "errors": _no_provider_result()["errors"]}
+        return {"provider": "none", "symbols": 0, "skipped": skipped, "errors": _no_provider_result()["errors"]}
 
     by_type = dict(tracked)
     written = db.cache_quotes(
         (symbol, by_type.get(symbol, "stock"), price, sector)
         for symbol, (price, sector) in prices.items()
     )
-    return {"provider": provider_name, "symbols": written, "errors": errors}
+    return {"provider": provider_name, "symbols": written, "skipped": skipped, "errors": errors}
+
+
+def refresh_tracked_history() -> dict:
+    """Top up the shared daily-close cache for every tracked symbol.
+
+    Runs once per trading day, after the US close (the scheduler gates the
+    timing). Each symbol costs at most one provider call — `` fetch_symbol_history``
+    asks ``_effective_period`` for the smallest window covering the gap since
+    the newest cached point, so an up-to-date symbol pulls a week's tail, and
+    only a brand-new one pulls a full year. Charts then render from cache
+    instead of paying the provider at view time.
+    """
+    tracked = db.list_tracked_symbols()
+    if not tracked:
+        return {"provider": connectors.active_market_data_id(), "symbols": 0, "skipped": 0, "errors": []}
+
+    today = datetime.now(UTC).date().isoformat()
+    bounds = db.cached_history_bounds([symbol for symbol, _ in tracked])
+    provider_name = connectors.active_market_data_id()
+    topped_up = 0
+    skipped = 0
+    errors: list[str] = []
+    for symbol, asset_type in tracked:
+        span = bounds.get(symbol.upper())
+        if span and span["latest"] >= today:
+            skipped += 1  # already has today's close (e.g. a restart re-ran the sweep)
+            continue
+        result = fetch_symbol_history(symbol, asset_type, period="1y", force=True)
+        if result.get("dates"):
+            topped_up += 1
+        errors.extend(f"{symbol}: {err}" for err in result.get("errors", []))
+    return {"provider": provider_name, "symbols": topped_up, "skipped": skipped, "errors": errors}
 
 
 # Cached daily closes count as fresh if the newest point is within this many
@@ -380,8 +450,14 @@ def fetch_quote(symbol: str, asset_type: str = "stock") -> dict | None:
     return None
 
 
-def fetch_symbol_history(symbol: str, asset_type: str = "stock", period: str = "1y") -> dict:
-    """Single-symbol price history for the stock detail view."""
+def fetch_symbol_history(symbol: str, asset_type: str = "stock", period: str = "1y", force: bool = False) -> dict:
+    """Single-symbol price history for the stock detail view.
+
+    ``force`` skips the freshness early-return — the daily history sweep wants
+    today's close even while yesterday's still counts as "fresh". The
+    incremental-tail logic below still applies, so a forced fetch pulls days,
+    not a year.
+    """
     provider_name = connectors.active_market_data_id()
     key = symbol.upper()
 
@@ -390,7 +466,7 @@ def fetch_symbol_history(symbol: str, asset_type: str = "stock", period: str = "
     # every drill-in.
     start_date = _period_start_date(period)
     cached_fresh = db.get_cached_price_history([symbol], start_date).get(key)
-    if cached_fresh and _cache_is_fresh(cached_fresh, start_date):
+    if not force and cached_fresh and _cache_is_fresh(cached_fresh, start_date):
         return {
             "symbol": symbol,
             "period": period,

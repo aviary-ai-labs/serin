@@ -306,10 +306,45 @@ async def maybe_refresh_tracked_quotes() -> None:
         logger.warning("Shared quote sweep failed; users fall back to their own fetches", exc_info=True)
 
 
+_last_history_sweep_day: str | None = None
+
+
+async def maybe_refresh_tracked_history() -> None:
+    """Once per trading day, after the US close, top up every held symbol's
+    daily-close history in the shared cache.
+
+    22:00 UTC is past 16:00 ET in both EST and EDT, so gating on the UTC hour
+    needs no timezone math; weekends are skipped because there is no new close
+    to fetch. Never raises.
+    """
+    global _last_history_sweep_day
+    now = datetime.now(UTC)
+    if now.hour < 22 or now.weekday() >= 5:
+        return
+    day = now.date().isoformat()
+    if _last_history_sweep_day == day:
+        return
+    _last_history_sweep_day = day
+    try:
+        from backend.prices import refresh_tracked_history
+
+        with scope.using(scope.INSTANCE_SCOPE):
+            result = await asyncio.to_thread(refresh_tracked_history)
+        logger.info(
+            "History sweep: %s symbols topped up, %s already current",
+            result.get("symbols"), result.get("skipped"),
+        )
+        if result.get("errors"):
+            logger.warning("History sweep errors: %s", result["errors"][:3])
+    except Exception:
+        logger.warning("History sweep failed; charts fetch on demand as before", exc_info=True)
+
+
 async def scheduler_loop() -> None:
     logger.info("Briefing scheduler started (checking every %ss)", CHECK_INTERVAL_SECONDS)
     while True:
         await maybe_refresh_tracked_quotes()
+        await maybe_refresh_tracked_history()
         try:
             # Briefings are per-user: one schedule and one portfolio each. On
             # self-host this is a single pass; with accounts it visits everyone.

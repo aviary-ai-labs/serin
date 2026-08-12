@@ -8,6 +8,8 @@ bill tracks distinct symbols, not the people holding them.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from backend import db, prices, scope
 from backend.config import settings
@@ -191,3 +193,65 @@ def test_missing_tables_degrade_to_the_old_behaviour(fresh_db, fmp, caplog):
     assert result["updated"] == 2
     assert sorted(fmp) == ["AAPL", "MSFT"]
     assert db.list_tracked_symbols() == []
+
+
+# ---------------------------------------------------------------------------
+# Free-tier budget: sweeps must not spend calls that cannot buy new data
+
+
+def test_market_hours_check_reads_the_clock_correctly():
+    from datetime import datetime
+
+    # Tuesday 2026-08-11, 14:00 UTC = 10:00 ET — trading.
+    assert prices._us_equity_market_open(datetime(2026, 8, 11, 14, 0, tzinfo=UTC))
+    # Tuesday 03:00 UTC = Monday 23:00 ET — closed.
+    assert not prices._us_equity_market_open(datetime(2026, 8, 11, 3, 0, tzinfo=UTC))
+    # Saturday noon ET — closed.
+    assert not prices._us_equity_market_open(datetime(2026, 8, 15, 16, 0, tzinfo=UTC))
+
+
+def test_closed_market_sweep_skips_priced_stocks_but_not_new_ones(fresh_db, fmp, monkeypatch):
+    _hold("AAPL")
+    with scope.using(scope.LOCAL_SCOPE):
+        prices.refresh_tracked_quotes()  # warm AAPL while "open"
+    fmp.clear()
+
+    monkeypatch.setattr(prices, "_us_equity_market_open", lambda now=None: False)
+    _hold("MSFT")  # added after hours, never priced
+    with scope.using(scope.LOCAL_SCOPE):
+        result = prices.refresh_tracked_quotes()
+
+    assert fmp == ["MSFT"]  # AAPL's Friday close cannot change; MSFT deserves a first price
+    assert result["skipped"] == 1
+    assert result["symbols"] == 1
+
+
+def test_history_sweep_tops_up_and_then_stands_down(fresh_db, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setattr(settings, "market_data_provider", "fmp")
+    monkeypatch.setattr(settings, "fmp_api_key", "test-key")
+    history_calls: list[str] = []
+    today = datetime.now(UTC).date()
+
+    def fake_get(path, params, *args, **kwargs):
+        if path == "stable/profile":
+            return [{"price": 212.5, "sector": "Technology"}], None
+        if path == "stable/historical-price-eod/light":
+            history_calls.append(params["symbol"])
+            days = [today - timedelta(days=n) for n in range(3, -1, -1)]
+            return [{"date": d.isoformat(), "close": 100.0 + n} for n, d in enumerate(days)], None
+        raise AssertionError(path)
+
+    monkeypatch.setattr(fmp_provider, "_get", fake_get)
+    _hold("AAPL")
+
+    with scope.using(scope.LOCAL_SCOPE):
+        first = prices.refresh_tracked_history()
+        again = prices.refresh_tracked_history()
+
+    assert history_calls == ["AAPL"]          # one call, once
+    assert first["symbols"] == 1
+    assert again["skipped"] == 1              # today's close is already cached
+    cached = db.get_cached_price_history(["AAPL"])["AAPL"]
+    assert cached["dates"][-1] == today.isoformat()
