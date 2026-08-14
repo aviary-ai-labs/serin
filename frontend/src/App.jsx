@@ -909,6 +909,7 @@ function LockScreen({ onUnlocked }) {
   // self-host build without the pack shows exactly the screen it always did.
   const [authOpts, setAuthOpts] = useState({ signup_open: false, google: false, trial_signup: false });
   const [mode, setMode] = useState('signin');
+  const [emailFormOpen, setEmailFormOpen] = useState(false);
 
   useEffect(() => {
     const match = /[#&]setup=([^&]+)/.exec(window.location.hash || '');
@@ -979,6 +980,11 @@ function LockScreen({ onUnlocked }) {
   if (multiuser === null) return <div className="lock-screen" />;
 
   const chooseNew = Boolean(setupToken || resetToken);
+  // When Google leads, the password form starts collapsed: on a hosted
+  // instance it mostly serves checkout customers whose email isn't a Google
+  // account, and shown by default it reads as a signup form that isn't one.
+  const googleFirst = multiuser && !chooseNew && authOpts.google;
+  const showEmailForm = !googleFirst || emailFormOpen;
   const hint = resetToken
     ? 'Choose a new password for your Serin account.'
     : setupToken
@@ -1024,42 +1030,56 @@ function LockScreen({ onUnlocked }) {
                 New to Serin? That button also starts your free 7-day trial — no card needed.
               </p>
             )}
-            <div className="lock-or">or</div>
           </>
         )}
-        {multiuser && !chooseNew && (
-          <input
-            type="email"
-            autoFocus
-            value={email}
-            placeholder="Email"
-            aria-label="Email"
-            autoComplete="username"
-            onChange={event => setEmail(event.target.value)}
-          />
-        )}
-        <input
-          type="password"
-          autoFocus={!multiuser || chooseNew}
-          value={password}
-          placeholder={chooseNew ? 'Choose a password' : multiuser ? (mode === 'signup' ? 'Choose a password (10+ characters)' : 'Password') : 'Passphrase'}
-          aria-label={chooseNew ? 'Choose a password' : 'Password'}
-          autoComplete={chooseNew || mode === 'signup' ? 'new-password' : 'current-password'}
-          onChange={event => setPassword(event.target.value)}
-        />
         {error && <div className="lock-error">{error}</div>}
         {notice && <div className="lock-note">{notice}</div>}
-        <button
-          className="btn btn-primary"
-          type="submit"
-          disabled={busy || !password || (multiuser && !chooseNew && !email)}
-        >
-          {busy ? 'Working…' : chooseNew ? 'Set password' : multiuser ? (mode === 'signup' ? 'Create account' : 'Sign in') : 'Unlock'}
-        </button>
-        {multiuser && !chooseNew && mode === 'signin' && (
-          <button type="button" className="lock-link" onClick={forgot} disabled={busy}>
-            Forgot your password?
+        {!showEmailForm ? (
+          // Google leads; passwords exist for customers whose checkout email
+          // isn't a Google account, so the form is a click away, not gone.
+          <button
+            type="button"
+            className="lock-link"
+            onClick={() => setEmailFormOpen(true)}
+          >
+            Sign in with email and password instead
           </button>
+        ) : (
+          <>
+            {googleFirst && <div className="lock-or">or</div>}
+            {multiuser && !chooseNew && (
+              <input
+                type="email"
+                autoFocus
+                value={email}
+                placeholder="Email"
+                aria-label="Email"
+                autoComplete="username"
+                onChange={event => setEmail(event.target.value)}
+              />
+            )}
+            <input
+              type="password"
+              autoFocus={!multiuser || chooseNew}
+              value={password}
+              placeholder={chooseNew ? 'Choose a password' : multiuser ? (mode === 'signup' ? 'Choose a password (10+ characters)' : 'Password') : 'Passphrase'}
+              aria-label={chooseNew ? 'Choose a password' : 'Password'}
+              autoComplete={chooseNew || mode === 'signup' ? 'new-password' : 'current-password'}
+              onChange={event => setPassword(event.target.value)}
+            />
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={busy || !password || (multiuser && !chooseNew && !email)}
+            >
+              {busy ? 'Working…' : chooseNew ? 'Set password' : multiuser ? (mode === 'signup' ? 'Create account' : 'Sign in') : 'Unlock'}
+            </button>
+            {multiuser && !chooseNew && mode === 'signin' && (
+              <button type="button" className="lock-link" onClick={forgot} disabled={busy}>
+                Forgot your password?
+              </button>
+            )}
+          </>
         )}
         {multiuser && !chooseNew && authOpts.signup_open && (
           <button
