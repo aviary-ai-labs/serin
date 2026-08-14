@@ -62,6 +62,29 @@ def set_authorizer(authorizer: Callable[[Any, Any], bool] | None) -> None:
     _authorizer = authorizer
 
 
+# Optional post-authorization veto, also pack-installed. Runs after the
+# authorizer has said yes, and may still refuse this particular request —
+# e.g. an account whose subscription lapsed keeps read and export access but
+# loses actions that cost money. Signature: (method, path) -> None to allow,
+# or a user-facing reason; the middleware answers 402 Payment Required with
+# it. Distinct from the authorizer because the two answers differ: "who are
+# you" is 401 and ends at the login screen, "you may not do this right now"
+# is 402 and must leave the session standing.
+_request_gate: Callable[[str, str], str | None] | None = None
+
+
+def set_request_gate(gate: Callable[[str, str], str | None] | None) -> None:
+    global _request_gate
+    _request_gate = gate
+
+
+def request_denial(method: str, path: str) -> str | None:
+    """The installed gate's objection to this request, or None."""
+    if _request_gate is None:
+        return None
+    return _request_gate(method, path)
+
+
 def authorizer_installed() -> bool:
     """True when a pack has taken over the authorization decision."""
     return _authorizer is not None

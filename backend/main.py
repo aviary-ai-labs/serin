@@ -156,6 +156,11 @@ async def observability_and_auth(request, call_next):
             from fastapi.responses import JSONResponse
 
             return JSONResponse({"detail": "Locked — sign in first."}, status_code=401)
+        denial = auth.request_denial(request.method, request.url.path)
+        if denial:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({"detail": denial}, status_code=402)
 
     started = _time.perf_counter()
     response = await call_next(request)

@@ -2495,6 +2495,42 @@ a:hover { text-decoration: underline; }
 .icon-btn:hover { background: var(--inset); color: var(--ink); border-color: var(--bd); }
 .icon-btn.danger:hover { color: var(--down); border-color: #f3c9c5; }
 
+/* Trial countdown chip (header) and the trial/lapsed notice banners. */
+.trial-chip {
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--acc);
+  background: rgba(47, 107, 237, 0.08);
+  border: 1px solid rgba(47, 107, 237, 0.28);
+  border-radius: 999px;
+  padding: 7px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.trial-chip:hover { background: rgba(47, 107, 237, 0.14); border-color: rgba(47, 107, 237, 0.45); }
+
+.notice-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 13px 18px;
+  margin-bottom: 16px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-card);
+  background: var(--card);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.notice-banner.trial { border-color: #ecd9a8; background: #fdf8ec; }
+.notice-banner.lapsed { border-color: #f3c9c5; background: #fdf1ef; }
+.notice-banner > span { flex: 1 1 320px; }
+.notice-actions { display: inline-flex; align-items: center; gap: 8px; }
+
 .empty-cell {
   padding: 28px 14px !important;
   text-align: center;

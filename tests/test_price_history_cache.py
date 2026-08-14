@@ -4,15 +4,19 @@ from datetime import UTC, datetime, timedelta
 
 from backend import db, prices
 from backend.config import settings
+from backend.connectors.market_data import cboe as cboe_connector
 from backend.models import PositionIn
 from backend.providers import fmp as fmp_provider
 from backend.providers import yahoo as yahoo_provider
 
 
 def _mute_yahoo(monkeypatch):
-    """Down the keyless Yahoo backstop in the chain so 'provider down' tests
+    """Down the keyless chain members (Yahoo, Cboe) so 'provider down' tests
     exercise the cache path deterministically (no real network)."""
     monkeypatch.setattr(yahoo_provider, "_get", lambda *a, **k: (None, "429 Too Many Requests"))
+    monkeypatch.setattr(
+        cboe_connector, "_fetch_series", lambda *a, **k: ([], "Cboe request failed: 429")
+    )
 
 
 def _days_ago(n: int) -> str:

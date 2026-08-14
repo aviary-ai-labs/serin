@@ -30,6 +30,7 @@ from backend.connectors.holdings import generic_csv as _generic_csv  # noqa: F40
 from backend.connectors.holdings import snaptrade as _snaptrade  # noqa: F401
 from backend.connectors.insight import briefing as _briefing  # noqa: F401
 from backend.connectors.market_data import alphavantage as _alphavantage  # noqa: F401
+from backend.connectors.market_data import cboe as _cboe  # noqa: F401
 from backend.connectors.market_data import coingecko as _coingecko  # noqa: F401
 from backend.connectors.market_data import fmp as _fmp  # noqa: F401
 from backend.connectors.market_data import stooq as _stooq  # noqa: F401

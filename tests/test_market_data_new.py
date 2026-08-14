@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from backend.connectors.market_data import alphavantage, stooq
+from backend.connectors.market_data import alphavantage, cboe, stooq
 
 AV_QUOTE = {
     "Global Quote": {
@@ -152,3 +152,60 @@ def test_stooq_unknown_symbol(monkeypatch):
     monkeypatch.setattr(stooq.httpx, "get", lambda url, params=None, timeout=None: FakeResp(text="<html>error</html>"))
     res = stooq.StooqConnector({}).test()
     assert res.ok is False
+
+
+# --- Cboe -------------------------------------------------------------------
+
+CBOE_DATA = {
+    "data": [
+        {"date": "2004-01-02", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05, "volume": 100},
+        {"date": "2026-07-01", "open": 180.0, "high": 182.0, "low": 179.0, "close": 181.0, "volume": 900},
+        {"date": "2026-07-02", "open": 181.0, "high": 184.0, "low": 180.5, "close": 183.0, "volume": 800},
+        {"date": "2026-07-03", "open": 183.0, "high": 186.0, "low": 182.0, "close": 185.5, "volume": 700},
+    ]
+}
+
+
+def _cboe_ok(monkeypatch, payload=CBOE_DATA):
+    monkeypatch.setattr(
+        cboe.httpx, "get", lambda url, headers=None, timeout=None: FakeResp(json=payload)
+    )
+
+
+def test_cboe_symbol_mapping():
+    assert cboe._cboe_symbol("afrm", "stock") == "AFRM"
+    assert cboe._cboe_symbol("BTC", "crypto") is None
+
+
+def test_cboe_history_full_depth_and_period_slice(monkeypatch):
+    _cboe_ok(monkeypatch)
+    connector = cboe.CboeConnector({})
+    # "max" keeps the whole listed lifetime — the point of this source.
+    full = connector.fetch_history("max", ["AAPL"], {"AAPL": _pos("AAPL")})
+    assert full["history"]["AAPL"]["dates"][0] == "2004-01-02"
+    # A bounded period slices locally (one request returns everything). 5y
+    # keeps the 2026 fixture rows and drops 2004 for decades to come.
+    recent = connector.fetch_history("5y", ["AAPL"], {"AAPL": _pos("AAPL")})
+    assert recent["history"]["AAPL"]["dates"] == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert recent["history"]["AAPL"]["closes"] == [181.0, 183.0, 185.5]
+
+
+def test_cboe_refresh_and_quote_use_last_close(monkeypatch):
+    _cboe_ok(monkeypatch)
+    connector = cboe.CboeConnector({})
+    assert connector.refresh_prices([_pos("AAPL")])["prices"]["AAPL"] == (185.5, "")
+    q = connector.quote("AAPL", "stock")
+    assert q["price"] == 185.5
+    assert q["previous_close"] == 183.0
+    assert q["day_high"] == 186.0
+    assert q["provider"] == "cboe"
+
+
+def test_cboe_failure_is_an_error_not_a_crash(monkeypatch):
+    def boom(url, headers=None, timeout=None):
+        raise cboe.httpx.ConnectError("no route")
+
+    monkeypatch.setattr(cboe.httpx, "get", boom)
+    out = cboe.CboeConnector({}).fetch_history("1y", ["AAPL"], {})
+    assert out["history"] == {}
+    assert "Cboe request failed" in out["errors"][0]

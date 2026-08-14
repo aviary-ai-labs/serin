@@ -14,7 +14,7 @@ import { StockDetail } from './components/StockDetail.jsx';
 import { StockGrid } from './components/StockGrid.jsx';
 import { ConnectorsView } from './components/Connectors.jsx';
 import { SmartImport } from './components/SmartImport.jsx';
-import { IconRefresh, IconUpload, IconDownload, IconPlus, IconLink } from './components/Icons.jsx';
+import { IconRefresh, IconUpload, IconDownload, IconPlus, IconLink, IconSignOut, IconX } from './components/Icons.jsx';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -89,6 +89,7 @@ export default function App() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [locked, setLocked] = useState(false);
+  const [account, setAccount] = useState(null); // { email } when signed in on a multiuser host
 
   // App lock: any 401 flips the shell into the lock screen; a successful
   // login flips it back and reloads everything.
@@ -97,6 +98,56 @@ export default function App() {
     window.addEventListener('serin:locked', onLocked);
     return () => window.removeEventListener('serin:locked', onLocked);
   }, []);
+
+  // Who is signed in, for the header's sign-out control and the trial /
+  // lapsed banners. Multiuser only — the single-user passphrase lock has no
+  // account to leave and no subscription to run out.
+  const probeAccount = useCallback(async () => {
+    try {
+      const info = await api('/api/v1/version');
+      if (!info.multiuser) return;
+      const me = await api('/api/auth/me');
+      setAccount(me.authenticated && me.email
+        ? { email: me.email, status: me.status || 'active', trialDaysLeft: me.trial_days_left ?? null }
+        : null);
+    } catch {
+      setAccount(null);
+    }
+  }, []);
+  useEffect(() => { probeAccount(); }, [probeAccount]);
+
+  async function signOut() {
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // The session cookie may already be dead; clearing local state is what matters.
+    }
+    // Drop the localStorage bearer mirror too, or requests keep authenticating.
+    setAuthToken('');
+    window.location.reload();
+  }
+
+  // One click from "trial ending" to a card on file: a fresh Stripe portal
+  // session, minted server-side so no billing detail ever touches this app.
+  async function openPortal() {
+    try {
+      const { url } = await api('/api/auth/portal', { method: 'POST' });
+      if (url) window.location.assign(url);
+      else throw new Error('Billing did not answer with a portal link.');
+    } catch (error) {
+      addToast('error', error.message);
+    }
+  }
+
+  // The ending-soon banner is dismissible per browser session — nagging once
+  // per visit is a reminder, nagging on every render is a hostage note.
+  const [trialNoticeDismissed, setTrialNoticeDismissed] = useState(() => {
+    try { return sessionStorage.getItem('serin_trial_notice') === '1'; } catch { return false; }
+  });
+  function dismissTrialNotice() {
+    setTrialNoticeDismissed(true);
+    try { sessionStorage.setItem('serin_trial_notice', '1'); } catch { /* private mode */ }
+  }
 
   const [toasts, setToasts] = useState([]);
   const [busy, setBusy] = useState('');
@@ -494,6 +545,7 @@ export default function App() {
       <LockScreen
         onUnlocked={async () => {
           setLocked(false);
+          probeAccount();
           try {
             await loadAll();
           } catch (error) {
@@ -504,8 +556,37 @@ export default function App() {
     );
   }
 
+  const trialEndsSoon = account?.status === 'trialing'
+    && account.trialDaysLeft != null && account.trialDaysLeft <= 3;
+
   return (
     <div className="app-container">
+      {trialEndsSoon && !trialNoticeDismissed && (
+        <div className="notice-banner trial" role="status">
+          <span>
+            Your free trial ends {account.trialDaysLeft <= 1 ? 'today' : `in ${account.trialDaysLeft} days`} —
+            subscribe to keep AI briefings, live prices and imports. Your data stays yours either way.
+          </span>
+          <div className="notice-actions">
+            <button className="btn btn-primary" onClick={openPortal}>Continue with Serin · $8/mo</button>
+            <button className="icon-btn" aria-label="Dismiss for this visit" onClick={dismissTrialNotice}>
+              <IconX size={15} />
+            </button>
+          </div>
+        </div>
+      )}
+      {account?.status === 'lapsed' && (
+        <div className="notice-banner lapsed" role="status">
+          <span>
+            Your trial has ended, so briefings, price updates and imports are paused.
+            Your portfolio is intact — browse it, export it, or pick up where you left off.
+          </span>
+          <div className="notice-actions">
+            <button className="btn btn-primary" onClick={openPortal}>Continue with Serin · $8/mo</button>
+            <a className="btn" href="/api/backup/positions.csv">Download CSV</a>
+          </div>
+        </div>
+      )}
       <header className="header">
         <div className="header-left">
           <h1 className="brand"><BrandMark /><span>serin</span></h1>
@@ -564,6 +645,25 @@ export default function App() {
             <IconUpload /> Smart Import
           </button>
           <button className="btn btn-primary" onClick={() => setModal({ mode: 'add' })}><IconPlus /> Add position</button>
+          {account?.status === 'trialing' && account.trialDaysLeft != null && (
+            <button
+              className="trial-chip"
+              onClick={openPortal}
+              title="You have the full product during the trial. Click to add a payment method and continue after it ends."
+            >
+              Trial · {account.trialDaysLeft}d left
+            </button>
+          )}
+          {account && (
+            <button
+              className="icon-btn"
+              onClick={signOut}
+              title={`Signed in as ${account.email} — sign out`}
+              aria-label={`Sign out (${account.email})`}
+            >
+              <IconSignOut size={16} />
+            </button>
+          )}
         </div>
       </header>
 
