@@ -595,7 +595,9 @@ export default function App() {
               ? '· refreshing prices…'
               : portfolio?.last_refresh
                 ? `· ${dateShort(portfolio.last_refresh)}`
-                : '· local portfolio intelligence'}
+                // "local" is the self-host privacy brag; a signed-in Cloud
+                // account is by definition not local.
+                : account ? '· portfolio intelligence' : '· local portfolio intelligence'}
           </span>
         </div>
         <nav className="tab-nav" aria-label="Sections">
@@ -905,7 +907,7 @@ function LockScreen({ onUnlocked }) {
   const [notice, setNotice] = useState('');
   // What the identity layer offers beyond passwords. Defaults off, so a
   // self-host build without the pack shows exactly the screen it always did.
-  const [authOpts, setAuthOpts] = useState({ signup_open: false, google: false });
+  const [authOpts, setAuthOpts] = useState({ signup_open: false, google: false, trial_signup: false });
   const [mode, setMode] = useState('signin');
 
   useEffect(() => {
@@ -918,7 +920,11 @@ function LockScreen({ onUnlocked }) {
         setMultiuser(Boolean(info.multiuser));
         if (info.multiuser) {
           api('/api/auth/me')
-            .then(me => setAuthOpts({ signup_open: Boolean(me.signup_open), google: Boolean(me.google) }))
+            .then(me => setAuthOpts({
+              signup_open: Boolean(me.signup_open),
+              google: Boolean(me.google),
+              trial_signup: Boolean(me.trial_signup),
+            }))
             .catch(() => {});
         }
       })
@@ -1013,6 +1019,11 @@ function LockScreen({ onUnlocked }) {
               </svg>
               Continue with Google
             </a>
+            {authOpts.trial_signup && (
+              <p className="lock-trial-hint">
+                New to Serin? That button also starts your free 7-day trial — no card needed.
+              </p>
+            )}
             <div className="lock-or">or</div>
           </>
         )}
@@ -1061,8 +1072,10 @@ function LockScreen({ onUnlocked }) {
           </button>
         )}
         {/* Strangers reach this screen from the public site's CTA with no
-            credentials and no way out but the back button. */}
-        <a className="lock-out" href="/">New here? What Serin is →</a>
+            credentials and no way out but the back button. Deep-link the
+            pricing section, not "/" — the bare landing reads as a dead end
+            when what a newcomer wants is the way in. */}
+        <a className="lock-out" href="/#pricing">New here? What Serin is, and the free trial →</a>
       </form>
     </div>
   );
