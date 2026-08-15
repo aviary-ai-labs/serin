@@ -116,6 +116,12 @@ export default function App() {
   }, []);
   useEffect(() => { probeAccount(); }, [probeAccount]);
 
+  // The tab is also reachable by deep link (#connectors) — bounce hosted
+  // accounts to the overview once the probe identifies them.
+  useEffect(() => {
+    if (account && tab === 'connectors') setTab('overview');
+  }, [account, tab]);
+
   async function signOut() {
     try {
       await api('/api/auth/logout', { method: 'POST' });
@@ -606,6 +612,12 @@ export default function App() {
             item.id === 'briefings' && xray.status === 'ok'
               ? [{ id: 'xray', label: 'X-ray' }, item]
               : [item]
+          )).filter(item => (
+            // Hosted accounts get no Connectors tab: market data and AI are
+            // part of what they pay for, and the page under it is operator
+            // plumbing — env-managed keys and instance toggles the API
+            // (rightly) refuses to save for them.
+            item.id !== 'connectors' || !account
           )).map(item => (
             <button
               key={item.id}
@@ -892,6 +904,18 @@ const AUTH_ERROR_ON_LOAD = (() => {
   return decodeURIComponent(match[1]).replace(/\+/g, ' ');
 })();
 
+// Setup/reset links arrive as URL fragments too, and meet the same fate the
+// auth_error above exists to dodge: the shell's tab routing replaceState()s
+// the hash away on first render, before LockScreen ever mounts — a paying
+// customer's emailed set-your-password link bounced to a bare login screen.
+// Capture at module load, which runs before any component.
+const _hashToken = name => {
+  const match = new RegExp(`[#&]${name}=([^&]+)`).exec(window.location.hash || '');
+  return match ? decodeURIComponent(match[1]) : '';
+};
+const SETUP_TOKEN_ON_LOAD = _hashToken('setup');
+const RESET_TOKEN_ON_LOAD = _hashToken('reset');
+
 function LockScreen({ onUnlocked }) {
   const [password, setPassword] = useState('');
   const [email, setEmail] = useState('');
@@ -900,10 +924,11 @@ function LockScreen({ onUnlocked }) {
   // null until the probe answers, so we never flash the wrong form.
   const [multiuser, setMultiuser] = useState(null);
   // A setup link (#setup=…) means the account exists but has no password yet —
-  // the customer is arriving from the welcome email after paying.
-  const [setupToken, setSetupToken] = useState('');
+  // the customer is arriving from the welcome email after paying. Seeded from
+  // the module-load capture; by mount time the hash is already gone.
+  const [setupToken, setSetupToken] = useState(SETUP_TOKEN_ON_LOAD);
   // A reset link works like a setup link: prove the email, choose a password.
-  const [resetToken, setResetToken] = useState('');
+  const [resetToken, setResetToken] = useState(RESET_TOKEN_ON_LOAD);
   const [notice, setNotice] = useState('');
   // What the identity layer offers beyond passwords. Defaults off, so a
   // self-host build without the pack shows exactly the screen it always did.
