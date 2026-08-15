@@ -1079,6 +1079,14 @@ function LockScreen({ onUnlocked }) {
                 Forgot your password?
               </button>
             )}
+            {multiuser && !chooseNew && mode === 'signin' && !authOpts.signup_open && (
+              // Email registration exists — it runs through the free-trial
+              // checkout, whose emailed setup link doubles as verification.
+              // Without this pointer the form reads as sign-in-only.
+              <a className="lock-link" href="/#pricing">
+                New here? Start a free trial with any email →
+              </a>
+            )}
           </>
         )}
         {multiuser && !chooseNew && authOpts.signup_open && (
