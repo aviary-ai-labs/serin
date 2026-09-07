@@ -161,8 +161,38 @@ class Connector:
         )
 
 
+@dataclass(frozen=True)
+class QuoteBudget:
+    """What one provider's quote allowance actually permits.
+
+    The sweep's cadence is arithmetic, not preference: how many requests a
+    book costs, against how many the plan allows. Both halves vary by
+    provider, and the first one varies by deployment — a book of 21 and a book
+    of 500 are different problems on the same plan.
+
+    ``batch_size`` is the lever that matters at scale. One symbol per request
+    means 500 requests a sweep, which no per-minute ceiling survives; fifty per
+    request means ten. A provider that batches turns a five-hundred-symbol
+    deployment into a cheaper sweep than a twenty-symbol one used to be.
+
+    Either ceiling may be None, meaning "not the binding constraint here".
+    """
+
+    batch_size: int = 1
+    per_minute: int | None = None
+    per_day: int | None = None
+
+    def requests_per_sweep(self, symbols: int) -> int:
+        return -(-max(symbols, 0) // max(self.batch_size, 1))     # ceil
+
+
 class MarketDataConnector(Connector):
     """Provides quotes, history and single-symbol detail."""
+
+    #: Overridden by providers that know their own limits. The default claims
+    #: nothing, so a provider that has not declared one never speeds the sweep
+    #: up on the strength of an assumption.
+    quote_budget: QuoteBudget = QuoteBudget()
 
     def refresh_prices(self, positions) -> dict:
         raise NotImplementedError

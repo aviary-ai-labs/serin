@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MarkdownRenderer } from './Markdown.jsx';
 import { IconSparkles } from './Icons.jsx';
+import { SerinBird } from './SerinBird.jsx';
 import { dateShort, dateDay, timeAgo, durationLabel, moneyPrecise } from '../format.js';
 
 function StatusChip({ status }) {
@@ -17,11 +18,15 @@ function StatusChip({ status }) {
 // and a version string on screen invites people to treat it as a promise. The
 // provider is the part that is actually a commitment — it says where the
 // portfolio goes — so that stays, and stays truthful.
-function aiProviderLabel(config) {
+function aiProviderLabel(config, hosted) {
   if (!config) return '';
   // Managed AI first: on Intelligence/Cloud the provider behind the proxy is
-  // Serin's implementation detail, same as the model.
-  if (config.ai_managed) return 'Serin AI';
+  // Serin's implementation detail, same as the model. Any hosted account
+  // gets the same treatment even when the backend's strict `ai_managed` flag
+  // is false — a Cloud instance can be running on a plain operator-set key
+  // (not the metered proxy) and the provider is still not the customer's to
+  // know or choose, exactly like the market-data source.
+  if (config.ai_managed || hosted) return 'Serin AI';
   if (config.ai_provider === 'claude_cli') return 'Claude CLI (dev only)';
   if (config.ai_provider === 'anthropic_api') return 'Anthropic';
   if (config.ai_provider === 'deepseek') return 'DeepSeek';
@@ -58,7 +63,7 @@ const BRIEFING_STYLES = [
     id: 'analyst',
     label: 'Analyst',
     title: 'Deeper context and themes',
-    description: 'Exposure, news links, concentration, and interpretation without advice.',
+    description: 'Exposure, news links, concentration, and interpretation without directives.',
   },
   {
     id: 'executive',
@@ -209,6 +214,7 @@ function BriefingPresentation({ briefing }) {
   return (
     <article className="briefing-deck">
       <header className="briefing-cover">
+        <SerinBird className="briefing-bird" />
         <div className="briefing-cover-main">
           <span className="briefing-kicker">Serin Daily Brief</span>
           <h1>{parsed.title}</h1>
@@ -256,13 +262,26 @@ function formatNextRun(iso) {
   }
 }
 
-function ScheduleCard({ schedule, config, aiReady, busy, onSave }) {
+function timeLabel(value) {
+  const [hours, minutes] = String(value || '').split(':').map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return value || '';
+  const suffix = hours >= 12 ? 'PM' : 'AM';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, '0')} ${suffix}`;
+}
+
+function ScheduleCard({ schedule, config, aiReady, busy, onSave, hosted }) {
   const [form, setForm] = useState({ enabled: false, time: '07:30', timezone: 'local', email_enabled: false });
-  const [dirty, setDirty] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+  // Local edits the server hasn't been told about yet — a ref, not state,
+  // because the incoming-schedule effect must see the CURRENT value, not the
+  // one captured when it last ran, or a save round-trip clobbers live typing.
+  const unsaved = useRef(false);
+  const pendingSave = useRef(null);
   const emailConfigured = Boolean(config?.email_configured);
 
   useEffect(() => {
-    if (schedule && !dirty) {
+    if (schedule && !unsaved.current) {
       setForm({
         enabled: schedule.enabled,
         time: schedule.time,
@@ -270,73 +289,116 @@ function ScheduleCard({ schedule, config, aiReady, busy, onSave }) {
         email_enabled: Boolean(schedule.email_enabled),
       });
     }
-  }, [schedule, dirty]);
+  }, [schedule]);
 
-  const setField = (key, value) => {
-    setForm(prev => ({ ...prev, [key]: value }));
-    setDirty(true);
-  };
+  useEffect(() => () => clearTimeout(pendingSave.current), []);
+  useEffect(() => {
+    if (!justSaved) return undefined;
+    const timer = setTimeout(() => setJustSaved(false), 2000);
+    return () => clearTimeout(timer);
+  }, [justSaved]);
+
+  // Four small values with an obvious meaning — nothing here is worth making
+  // someone press Save for. Flipping a switch commits at once; typing in a
+  // time waits for a pause, so we don't POST once per keystroke.
+  function commit(next, immediate = false) {
+    setForm(next);
+    unsaved.current = true;
+    clearTimeout(pendingSave.current);
+    const flush = () => {
+      unsaved.current = false;
+      setJustSaved(true);
+      onSave(next);
+    };
+    if (immediate) flush();
+    else pendingSave.current = setTimeout(flush, 700);
+  }
+
+  const setField = (key, value, immediate) => commit({ ...form, [key]: value }, immediate);
 
   const timezoneOptions = TIMEZONE_OPTIONS.some(([value]) => value === form.timezone)
     ? TIMEZONE_OPTIONS
     : [...TIMEZONE_OPTIONS, [form.timezone, form.timezone]];
+  const timezoneLabel = (timezoneOptions.find(([value]) => value === form.timezone) || [])[1] || form.timezone;
+
+  const status = busy
+    ? 'Saving…'
+    : justSaved
+      ? 'Saved'
+      : schedule?.enabled && schedule?.next_run
+        ? `next: ${formatNextRun(schedule.next_run)}`
+        : '';
 
   return (
     <section className="panel">
       <div className="panel-header">
         <h2>Morning Schedule</h2>
-        {schedule?.enabled && schedule?.next_run && (
-          <span className="panel-note">next: {formatNextRun(schedule.next_run)}</span>
-        )}
+        {status && <span className={`panel-note ${justSaved && !busy ? 'is-saved' : ''}`}>{status}</span>}
       </div>
       <div className="schedule-body">
-        <label className="schedule-toggle">
+        <label className="switch schedule-master">
           <input
             type="checkbox"
             checked={form.enabled}
-            onChange={event => setField('enabled', event.target.checked)}
+            onChange={event => setField('enabled', event.target.checked, true)}
           />
-          <span>Run the briefing automatically every morning</span>
-        </label>
-        <div className="schedule-fields">
-          <label className="form-label">Time
-            <input
-              type="time"
-              value={form.time}
-              onChange={event => setField('time', event.target.value)}
-              disabled={!form.enabled}
-            />
-          </label>
-          <label className="form-label">Timezone
-            <select
-              value={form.timezone}
-              onChange={event => setField('timezone', event.target.value)}
-              disabled={!form.enabled}
-            >
-              {timezoneOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <button
-            className="btn btn-primary"
-            disabled={!dirty || busy}
-            onClick={() => { onSave(form); setDirty(false); }}
-          >
-            {busy ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-        <label className={`schedule-toggle ${form.enabled && emailConfigured ? '' : 'is-disabled'}`}>
-          <input
-            type="checkbox"
-            checked={form.email_enabled && emailConfigured}
-            disabled={!form.enabled || !emailConfigured}
-            onChange={event => setField('email_enabled', event.target.checked)}
-          />
-          <span>
-            {emailConfigured
-              ? <>Email each scheduled briefing to <b>{config.email_to}</b></>
-              : <>Email delivery — set <code>SERIN_SMTP_*</code> and <code>SERIN_EMAIL_TO</code> in <code>.env</code> to enable</>}
+          <span className="switch-track"><span className="switch-thumb" /></span>
+          <span className="schedule-master-text">
+            <b>Daily briefing</b>
+            <em>
+              {form.enabled
+                ? `Every morning at ${timeLabel(form.time)} · ${timezoneLabel}`
+                : 'Off — run a briefing yourself with the button above.'}
+            </em>
           </span>
         </label>
+
+        {/* Everything below belongs to the switch above, so it lives inside
+            it rather than beside it — the old layout put a second checkbox at
+            the same level as the master, which read as an unrelated option
+            and had to be greyed out to hint otherwise. */}
+        {form.enabled && (
+          <div className="schedule-detail">
+            <div className="schedule-fields">
+              <label className="form-label">Time
+                <input
+                  type="time"
+                  value={form.time}
+                  onChange={event => setField('time', event.target.value)}
+                />
+              </label>
+              <label className="form-label">Timezone
+                <select
+                  value={form.timezone}
+                  onChange={event => setField('timezone', event.target.value, true)}
+                >
+                  {timezoneOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </label>
+            </div>
+
+            {emailConfigured ? (
+              <label className="switch schedule-email">
+                <input
+                  type="checkbox"
+                  checked={form.email_enabled}
+                  onChange={event => setField('email_enabled', event.target.checked, true)}
+                />
+                <span className="switch-track"><span className="switch-thumb" /></span>
+                <span className="switch-label">Email it to <b>{config.email_to}</b></span>
+              </label>
+            ) : (
+              <p className="schedule-email-note">
+                {/* The .env instructions are for an operator's own machine — a
+                    hosted account has no file to edit and nothing to restart. */}
+                {hosted
+                  ? <>Email delivery isn't available on Serin Cloud yet.</>
+                  : <>Email delivery — set <code>SERIN_SMTP_*</code> and <code>SERIN_EMAIL_TO</code> in <code>.env</code> to enable.</>}
+              </p>
+            )}
+          </div>
+        )}
+
         {form.enabled && !aiReady && (
           <div className="notice">
             Scheduling is on, but no AI provider is ready — scheduled runs will record an error
@@ -388,6 +450,7 @@ export function BriefingsView({
   onSavePreferences,
   schedule,
   onSaveSchedule,
+  hosted = false,
 }) {
   const [copied, setCopied] = useState(false);
   const [readerMode, setReaderMode] = useState('presentation');
@@ -434,7 +497,7 @@ export function BriefingsView({
           <h2>Daily Briefing</h2>
           <p>
             Serin reads your live portfolio snapshot and the latest market headlines, then writes the
-            briefing in the style you choose. Organization and context only — never trade advice.
+            briefing in the style you choose. Organization and context only — never trade directives.
           </p>
           <BriefingStylePicker
             value={selectedStyle}
@@ -445,10 +508,14 @@ export function BriefingsView({
         <div className="briefing-run-controls">
           <span
             className={`ai-chip ${aiReady ? '' : 'off'}`}
-            title={estimate?.basis ? `Estimate basis: ${estimate.basis}` : ''}
+            title={!hosted && estimate?.basis ? `Estimate basis: ${estimate.basis}` : ''}
           >
-            <i />{aiProviderLabel(config)}
-            {estimate?.estimated_cost_usd != null && (
+            <i />{aiProviderLabel(config, hosted)}
+            {/* The cost guard exists so a self-hoster paying per token isn't
+                surprised by a provider change — a hosted account's briefings
+                are bundled into the subscription, so there is no per-run
+                number that means anything to them. */}
+            {!hosted && estimate?.estimated_cost_usd != null && (
               <em className="ai-chip-cost">~${estimate.estimated_cost_usd.toFixed(4)}/run</em>
             )}
           </span>
@@ -460,10 +527,18 @@ export function BriefingsView({
 
       {!aiReady && (
         <div className="notice" style={{ marginBottom: 20 }}>
-          {config?.ai_error || 'No AI provider configured.'}{' '}
-          Set <code>ANTHROPIC_API_KEY</code> or <code>DEEPSEEK_API_KEY</code> in <code>.env</code> and
-          restart Serin. For local development you can instead run{' '}
-          <code>claude auth login --claudeai</code>.
+          {hosted
+            // A hosted account can't set an API key or restart the machine —
+            // an unready provider here is on the operator, not the customer.
+            ? (config?.ai_error || "AI briefings aren't available right now — this is on us, not something you need to fix.")
+            : (
+              <>
+                {config?.ai_error || 'No AI provider configured.'}{' '}
+                Set <code>ANTHROPIC_API_KEY</code> or <code>DEEPSEEK_API_KEY</code> in <code>.env</code> and
+                restart Serin. For local development you can instead run{' '}
+                <code>claude auth login --claudeai</code>.
+              </>
+            )}
         </div>
       )}
 
@@ -474,6 +549,7 @@ export function BriefingsView({
           aiReady={aiReady}
           busy={busy === 'schedule'}
           onSave={onSaveSchedule}
+          hosted={hosted}
         />
       </div>
 
@@ -517,7 +593,7 @@ export function BriefingsView({
                 {/* Managed AI is included in the plan, so the run's list-price
                     cost is our bookkeeping, not a charge — showing it reads as
                     one. Self-hosters pay it and should see it. */}
-                {selected.model_cost_usd > 0 && !config?.ai_managed && (
+                {selected.model_cost_usd > 0 && !config?.ai_managed && !hosted && (
                   <span>~{moneyPrecise(selected.model_cost_usd)}</span>
                 )}
                 {selected.emailed_at && <span>emailed {timeAgo(selected.emailed_at)}</span>}

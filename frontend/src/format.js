@@ -3,6 +3,55 @@
 // /api/config on load and after the user changes it.
 let DISPLAY_CURRENCY = 'USD';
 
+export const COMMON_BROKERS = [
+  'manual',
+  'robinhood',
+  'fidelity',
+  'charlesschwab',
+  'etrade',
+  'vanguard',
+  'merrill',
+  'morgan_stanley',
+  'ibkr',
+  'webull',
+  'sofi',
+  'tastytrade',
+  'alpaca',
+  'coinbase',
+  'binance',
+];
+
+const BROKER_LABELS = {
+  manual: 'Manual',
+  robinhood: 'Robinhood',
+  fidelity: 'Fidelity',
+  charlesschwab: 'Charles Schwab',
+  schwab: 'Charles Schwab',
+  etrade: 'E*TRADE',
+  vanguard: 'Vanguard',
+  merrill: 'Merrill',
+  morgan_stanley: 'Morgan Stanley',
+  ibkr: 'Interactive Brokers',
+  webull: 'Webull',
+  sofi: 'SoFi',
+  tastytrade: 'tastytrade',
+  alpaca: 'Alpaca',
+  coinbase: 'Coinbase',
+  binance: 'Binance',
+};
+
+export function normalizeBroker(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+export function brokerOptions(existing = []) {
+  return [...new Set(
+    [...existing, ...COMMON_BROKERS]
+      .map(normalizeBroker)
+      .filter(Boolean),
+  )];
+}
+
 export function setDisplayCurrency(code) {
   DISPLAY_CURRENCY = String(code || 'USD').toUpperCase();
 }
@@ -45,13 +94,31 @@ export function quantityLabel(value) {
 }
 
 export function brokerLabel(value) {
-  return String(value || 'manual').replace(/_/g, ' ');
+  const broker = normalizeBroker(value || 'manual');
+  return BROKER_LABELS[broker] || broker.replace(/_/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+/**
+ * Parse a date the way the value means it.
+ *
+ * `new Date("2026-08-20")` is specified to parse a bare date as UTC midnight,
+ * and every toLocale* call then renders it in local time — which lands on the
+ * previous day everywhere west of Greenwich. A transaction date is a calendar
+ * day, not an instant, so a ledger built on the plain constructor shows every
+ * trade a day early for most of the world. Timestamps that carry a time are
+ * genuine instants and are left alone.
+ */
+function asLocalDate(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T00:00:00`);
+  }
+  return new Date(value);
 }
 
 export function dateShort(value) {
   if (!value) return '';
   try {
-    return new Date(value).toLocaleString('en-US', {
+    return asLocalDate(value).toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
       hour: 'numeric',
@@ -65,11 +132,28 @@ export function dateShort(value) {
 export function dateDay(value) {
   if (!value) return '';
   try {
-    return new Date(value).toLocaleDateString('en-US', {
+    return asLocalDate(value).toLocaleDateString('en-US', {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
       year: 'numeric',
+    });
+  } catch {
+    return value;
+  }
+}
+
+/** A ledger date: day, month and year, no time.
+ *
+ *  dateShort renders "Aug 12, 12:00 AM" — a midnight that is an artifact of
+ *  parsing a bare date, not something the broker recorded. And a drill-in
+ *  sorted by size, not by date, puts 2016 next to 2026, so the year is the
+ *  part that cannot be dropped. */
+export function dateLedger(value) {
+  if (!value) return '';
+  try {
+    return asLocalDate(value).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
     });
   } catch {
     return value;

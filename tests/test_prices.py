@@ -41,19 +41,30 @@ def test_refresh_prices_endpoint_accepts_target_symbols(monkeypatch):
 
 
 def test_missing_fmp_key_returns_visible_market_data_error(tmp_path, monkeypatch):
-    """When the user explicitly chose FMP and didn't configure it, prices.refresh
-    surfaces a helpful error that mentions the Yahoo fallback."""
+    """A provider the user chose and did not configure has to say so.
+
+    Quotes fall through the chain now, so a later provider may well cover for
+    the broken one — which is the point of a chain, and also exactly how a
+    misconfigured key goes unnoticed for months. The complaint survives the
+    fallthrough."""
     db.set_db_path(tmp_path / "serin-test.db")
     db.init_db()
     db.create_position(PositionIn(symbol="AAPL", broker="manual", asset_type="stock", quantity=1))
     monkeypatch.setattr(settings, "market_data_provider", "fmp")
     monkeypatch.setattr(settings, "fmp_api_key", "")
+    # FMP alone in the chain, so the test is about FMP and not about whichever
+    # keyless backstop happens to be enabled.
+    from backend.providers import fmp as fmp_provider
+
+    monkeypatch.setattr(
+        prices.connectors, "market_data_chain",
+        lambda: [("fmp", fmp_provider.FMPProvider(api_key=""))],
+    )
 
     result = prices.refresh_prices({"AAPL"})
 
-    assert result["provider"] == "none"
     assert result["updated"] == 0
-    assert len(result["errors"]) == 1
+    assert result["errors"]
     # Message should hint at both setting an FMP key and the free Yahoo fallback.
     assert "FMP" in result["errors"][0] or "yahoo" in result["errors"][0].lower()
 
@@ -75,8 +86,13 @@ def test_refresh_prices_uses_fmp_when_configured(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "fmp_api_key", "test-key")
 
     def fake_fmp_get(path, params, *args, **kwargs):
-        assert params["symbol"] == "AAPL"
+        # The sweep now asks the quote endpoint for the whole book first and
+        # only falls to the profile for a symbol whose sector it lacks.
+        if path == "stable/quote":
+            return [{"symbol": s, "price": 212.5}
+                    for s in params["symbol"].split(",")], None
         if path == "stable/profile":
+            assert params["symbol"] == "AAPL"
             return [{"price": 212.5, "sector": "Technology"}], None
         raise AssertionError(path)
 

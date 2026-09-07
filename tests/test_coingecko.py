@@ -117,7 +117,10 @@ def test_refresh_routes_crypto_to_layer(tmp_path, monkeypatch):
             assert all(p.asset_type == "crypto" for p in positions)
             return {"prices": {"BTC": (61000.0, "Crypto")}, "errors": []}
 
-    monkeypatch.setattr(prices.connectors, "active_market_data", lambda: FakeMain())
+    # Quotes walk the whole provider chain now, the way history already did,
+    # so the chain is the seam a fake has to stand in for.
+    monkeypatch.setattr(prices.connectors, "market_data_chain",
+                        lambda: [("yahoo", FakeMain())])
     monkeypatch.setattr(prices.connectors, "active_market_data_id", lambda: "yahoo")
     monkeypatch.setattr(prices.connectors, "active_crypto_data", lambda: FakeCrypto())
 

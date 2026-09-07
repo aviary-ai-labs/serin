@@ -117,3 +117,97 @@ def test_schedule_accepts_email_enabled(tmp_path):
     ).json()
     assert saved["email_enabled"] is True
     assert client.get("/api/schedule").json()["email_enabled"] is True
+
+
+# --- the alt-sender seam -----------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _clean_alt_sender():
+    """The seam is a module-level global — leave it as core found it, or
+    one test's pack simulation leaks into every test after it."""
+    yield
+    emailer.set_alt_sender(None)
+
+
+def test_email_ready_reflects_smtp_when_nothing_else_is_installed(email_env):
+    assert emailer.email_ready() is True
+    email_env.setattr(settings, "smtp_host", "")
+    assert emailer.email_ready() is False
+
+
+def test_an_installed_alt_sender_overrides_smtp_readiness(monkeypatch):
+    """A pack's relay can be ready when self-host SMTP isn't (the Cloud/
+    Intelligence case) — and, just as important, be reported NOT ready even
+    though it's installed (an expired license), so the UI never offers a
+    toggle that will just fail every run."""
+    monkeypatch.setattr(settings, "smtp_host", "")
+    ready = {"value": True}
+    emailer.set_alt_sender(lambda briefing: "someone@example.com", lambda: ready["value"])
+    assert emailer.email_ready() is True
+    ready["value"] = False
+    assert emailer.email_ready() is False
+    assert emailer.alt_sender_installed() is True
+
+
+def test_deliver_prefers_the_alt_sender_when_installed(monkeypatch):
+    calls = []
+    emailer.set_alt_sender(lambda briefing: calls.append(briefing.id) or "relay@example.com")
+    assert emailer.deliver_scheduled_briefing_email(_briefing()) == "relay@example.com"
+    assert calls == [1]
+
+
+def test_deliver_falls_back_to_smtp_when_nothing_is_installed(email_env, monkeypatch):
+    sent = {}
+
+    def fake_send(b):
+        sent["id"] = b.id
+        return "smtp@example.com"
+
+    monkeypatch.setattr(emailer, "send_briefing_email", fake_send)
+    assert emailer.deliver_scheduled_briefing_email(_briefing()) == "smtp@example.com"
+    assert sent["id"] == 1
+
+
+def test_alt_recipient_is_display_only_and_swallows_errors():
+    assert emailer.alt_recipient() == ""  # nothing installed
+    emailer.set_alt_sender(lambda b: "x", None, lambda: "shown@example.com")
+    assert emailer.alt_recipient() == "shown@example.com"
+    emailer.set_alt_sender(lambda b: "x", None, lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert emailer.alt_recipient() == ""
+
+
+def test_config_email_fields_use_the_alt_path_when_smtp_is_unset(tmp_path, monkeypatch):
+    db.set_db_path(tmp_path / "serin-test.db")
+    db.init_db()
+    monkeypatch.setattr(settings, "smtp_host", "")
+    emailer.set_alt_sender(lambda b: "x", lambda: True, lambda: "relay@example.com")
+    payload = TestClient(app).get("/api/config").json()
+    assert payload["email_configured"] is True
+    assert payload["email_to"] == "relay@example.com"
+
+
+def test_email_endpoint_503_message_names_the_plan_not_env_when_alt_is_installed(tmp_path):
+    """An installed-but-not-ready alt sender means this account belongs to a
+    paid plan whose delivery is temporarily down — telling them to edit a
+    .env file they don't have would be actively wrong."""
+    db.set_db_path(tmp_path / "serin-test.db")
+    db.init_db()
+    emailer.set_alt_sender(lambda b: "x", lambda: False)
+    resp = TestClient(app).post("/api/briefings/1/email")
+    assert resp.status_code == 503
+    assert ".env" not in resp.json()["detail"]
+
+
+def test_email_endpoint_uses_deliver_so_alt_sender_is_reached(tmp_path):
+    db.set_db_path(tmp_path / "serin-test.db")
+    db.init_db()
+    briefing = db.create_briefing(snapshot={}, model="m")
+    db.finish_briefing(briefing.id, status="done", output_markdown="# B", summary="s")
+
+    reached = []
+    emailer.set_alt_sender(lambda b: reached.append(b.id) or "relay@example.com", lambda: True)
+    resp = TestClient(app).post(f"/api/briefings/{briefing.id}/email")
+
+    assert resp.status_code == 200
+    assert resp.json()["to"] == "relay@example.com"
+    assert reached == [briefing.id]

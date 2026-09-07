@@ -10,17 +10,29 @@ import { api } from '../api.js';
 
 export function useXray() {
   const [state, setState] = useState({ status: 'loading' });
+  // A recompute takes seven to eight seconds against the live portfolio. With
+  // no pending state the button looked broken: you clicked, nothing moved, and
+  // the same numbers eventually reappeared — indistinguishable from a dead
+  // control. It also accepted a second click, which sent a second request.
+  const [running, setRunning] = useState(false);
+  const [ranAt, setRanAt] = useState(null);
 
   const reload = useCallback(() => {
     let alive = true;
+    setRunning(true);
     api('/api/connectors/xray/run', { method: 'POST', body: JSON.stringify({}) })
-      .then(data => { if (alive) setState({ status: 'ok', data }); })
-      .catch(err => { if (alive) setState({ status: err.status === 404 ? 'absent' : 'error' }); });
+      .then(data => {
+        if (!alive) return;
+        setState({ status: 'ok', data });
+        setRanAt(new Date());
+      })
+      .catch(err => { if (alive) setState({ status: err.status === 404 ? 'absent' : 'error' }); })
+      .finally(() => { if (alive) setRunning(false); });
     return () => { alive = false; };
   }, []);
 
   useEffect(() => reload(), [reload]);
-  return { ...state, reload };
+  return { ...state, reload, running, ranAt };
 }
 
 const pct = x => `${(Math.max(0, x || 0) * 100).toFixed(1)}%`;
@@ -70,6 +82,10 @@ export function XrayTeaser({ xray, onOpen }) {
   if (xray.status !== 'ok') return null; // no pack → no ad, per the pledge
   const { data } = xray;
   const flags = data.flags || [];
+  // The reason to open the tab. Risk flags describe a standing condition the
+  // reader has usually already seen; the drift line is the thing that is
+  // different from last time they looked.
+  const drifted = data.drift?.available ? (data.drift.flags || [])[0] : null;
 
   return (
     <section className="panel xray-card xray-teaser">
@@ -80,6 +96,7 @@ export function XrayTeaser({ xray, onOpen }) {
             {flags.length > 0 ? `${flags.length} risk flag${flags.length > 1 ? 's' : ''}` : 'No risk flags'}
             {data.effective_holdings != null && ` · ${data.effective_holdings} effective holdings`}
           </div>
+          {drifted && <div className="xray-teaser-drift">{drifted}</div>}
           {flags.length > 0 && <div className="xray-teaser-flag">{flags[0]}</div>}
         </>
       ) : (
@@ -101,7 +118,14 @@ export function XrayView({ xray }) {
   }
   const { data } = xray;
   if (!data.entitled) return <XrayUpsell message={data.message} />;
-  return <XrayReport data={data} onReload={xray.reload} />;
+  return (
+    <XrayReport
+      data={data}
+      onReload={xray.reload}
+      running={xray.running}
+      ranAt={xray.ranAt}
+    />
+  );
 }
 
 function XrayUpsell({ message }) {
@@ -129,7 +153,179 @@ function XrayUpsell({ message }) {
 const signedPct = x => `${x >= 0 ? '+' : ''}${(x || 0).toFixed(1)}%`;
 const PERIOD_LABELS = { '1m': '1M', '3m': '3M', ytd: 'YTD', '1y': '1Y' };
 
-function XrayReport({ data, onReload }) {
+// Weights, unclamped: `pct` floors at zero, and a margin balance is a real
+// negative cash weight that the drift panel has to be able to print.
+const weightPct = x => `${((x || 0) * 100).toFixed(1)}%`;
+// A weight moved from 41% to 54% moved thirteen *points*, not thirteen
+// percent. Percent of a percent is the ambiguity that makes people distrust
+// a number, so the unit is on the page.
+const points = x => `${x >= 0 ? '+' : '\u2212'}${Math.abs((x || 0) * 100).toFixed(1)} pts`;
+// Effective holdings is a count, so its move is a count too — signedPct would
+// print "−0.4%" for four-tenths of a holding.
+const signedCount = x => `${x >= 0 ? '+' : '\u2212'}${Math.abs(x || 0).toFixed(1)}`;
+// Same minus sign as the deltas beside it. A row reading "−4.0 pts · price
+// -48.1%" mixes a typographic minus with a hyphen at the same size.
+const signedMove = x => `${x >= 0 ? '+' : '\u2212'}${Math.abs(x || 0).toFixed(1)}%`;
+const DRIFT_FORMAT = { pct: weightPct, num: x => (x || 0).toFixed(1) };
+const DRIFT_DELTA = { pct: points, num: signedCount };
+
+// --- drift: what the portfolio has become -----------------------------------
+
+// A sparkline, not a chart: the shape of a slow change, at a size that fits
+// under the number it describes. `vector-effect` keeps the stroke honest —
+// preserveAspectRatio="none" stretches geometry, and a stretched stroke is
+// twice as thick at one end as the other.
+function Spark({ values }) {
+  if (!values || values.length < 3) return null;
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const span = high - low || 1;
+  const y = v => 26 - ((v - low) / span) * 24;
+  const path = values.map((v, i) => `${(i / (values.length - 1)) * 100},${y(v)}`).join(' ');
+  return (
+    <svg className="xray-spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+      {/* Every spark is scaled to its own range, so four-tenths of a holding
+          fills the same box as thirty points of cash. The baseline is where
+          the window started: without it the shape is dramatic and unanchored. */}
+      <line x1="0" x2="100" y1={y(values[0])} y2={y(values[0])} vectorEffect="non-scaling-stroke" />
+      <polyline points={path} vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+// One mix row, drawn as where the weight was and where it went. The solid
+// stretch is the part that was already there; the cap is the change. Reading
+// two numbers off a row is work — reading a bar that grew is not.
+function DriftRow({ row, peak, ledgerBacked }) {
+  const base = Math.min(row.then, row.now);
+  const tip = Math.max(row.then, row.now);
+  const grew = row.now >= row.then;
+  const tag = row.traded
+    ? 'you traded'
+    : row.price_change_pct != null
+      ? `price ${signedMove(row.price_change_pct)}`
+      : ledgerBacked ? 'untouched' : null;
+
+  return (
+    <div className="xray-drift-row">
+      <span className="xray-bar-sym">{row.name}</span>
+      <span className="xray-bar-track">
+        <span className="xray-bar-fill" style={{ width: `${(base / peak) * 100}%` }} />
+        <span
+          className={`xray-drift-cap ${grew ? 'grew' : 'shrank'}`}
+          style={{ width: `${((tip - base) / peak) * 100}%` }}
+        />
+      </span>
+      <span className="xray-drift-then">{weightPct(row.then)} →</span>
+      <span className="xray-bar-val">{weightPct(row.now)}</span>
+      <span className="xray-drift-delta">{grew ? '↑' : '↓'} {points(row.delta)}</span>
+      <span className="xray-drift-tag">{tag}</span>
+    </div>
+  );
+}
+
+function DriftRows({ title, rows, ledgerBacked }) {
+  if (!rows || rows.length === 0) return null;
+  const peak = Math.max(...rows.map(r => Math.max(r.then, r.now)), 0.0001);
+  return (
+    <div className="xray-drift-col">
+      <div className="xray-drift-subtitle">{title}</div>
+      {rows.map(row => (
+        <DriftRow key={row.name} row={row} peak={peak} ledgerBacked={ledgerBacked} />
+      ))}
+    </div>
+  );
+}
+
+// The panel the tab leads with. Everything below it describes the portfolio as
+// it is today — true, and identical every morning to anyone who trades a few
+// times a year. This is the part that moves on its own.
+function XrayDrift({ drift }) {
+  if (!drift) return null;
+  if (!drift.available) {
+    return (
+      <section className="panel xray-drift xray-drift-quiet">
+        <div className="xray-drift-head">
+          <div className="xray-bars-title">What's changed</div>
+        </div>
+        <div className="xray-foot">{drift.reason}</div>
+      </section>
+    );
+  }
+
+  const trace = drift.series || [];
+  const sparks = {
+    top5_weight: trace.map(p => p.top5),
+    cash_drag: trace.map(p => p.cash),
+    effective_holdings: trace.map(p => p.effective),
+  };
+
+  return (
+    <section className="panel xray-drift">
+      <div className="xray-drift-head">
+        <div className="xray-bars-title">What's changed</div>
+        <span className="xray-drift-span">
+          {drift.span_label} · {drift.from} → {drift.to}
+        </span>
+      </div>
+
+      {drift.flags.length > 0 && (
+        <ul className="xray-drift-lede">
+          {drift.flags.map((flag, i) => <li key={i}>{flag}</li>)}
+        </ul>
+      )}
+
+      <div className="xray-drift-metrics">
+        {drift.metrics.map(metric => {
+          const format = DRIFT_FORMAT[metric.format] || DRIFT_FORMAT.num;
+          const rising = metric.delta >= 0;
+          return (
+            <div className="xray-drift-metric" key={metric.key}>
+              <div className="stat-label">{metric.label}</div>
+              <div className="xray-drift-metric-value">
+                <span className="xray-drift-then">{format(metric.then)} →</span>
+                <strong>{format(metric.now)}</strong>
+                <span className="xray-drift-delta">
+                  {rising ? '↑' : '↓'} {(DRIFT_DELTA[metric.format] || signedCount)(metric.delta)}
+                </span>
+              </div>
+              <Spark values={sparks[metric.key]} />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="xray-drift-cols">
+        <DriftRows title="By sector" rows={drift.sectors} ledgerBacked={drift.ledger_backed} />
+        <DriftRows title="By holding" rows={drift.positions} ledgerBacked={drift.ledger_backed} />
+      </div>
+
+      {/* What the reconstruction is and is not. The weights are rebuilt from
+          today's holdings and the transaction ledger, so how much of that
+          ledger exists decides how much of this is measured rather than
+          inferred. The basis note matters more than it looks: this panel
+          counts a symbol once across accounts and the cards above count each
+          account's row, which is a three-point gap on a real portfolio — and
+          an unexplained three-point gap between two numbers on one screen
+          reads as a bug in both of them. */}
+      <div className="xray-foot">
+        Weights rebuilt from your holdings and transaction history.
+        {!drift.ledger_backed && ' No trades are on record, so nothing here can tell a price move from a purchase you never imported.'}
+        {drift.ledger_backed && drift.coverage_note && ` ${drift.coverage_note}`}
+        {drift.symbols_in_two_accounts?.length > 0 &&
+          ` ${drift.symbols_in_two_accounts.join(', ')} ${drift.symbols_in_two_accounts.length > 1 ? 'are' : 'is'} held in more than one account and counted once here, so these weights differ from the cards above, which weigh each account's row separately.`}
+        {drift.price_coverage < 0.999 &&
+          ` Covers ${pct(drift.price_coverage)} of today's invested value — the rest has no price history to rebuild.`}
+        {drift.sector_coverage < 0.999 &&
+          ` Sectors known for ${pct(drift.sector_coverage)} of today's holdings.`}
+        {' '}Valuation and fee drift are not shown: those come from current fundamentals,
+        which have no history to compare against.
+      </div>
+    </section>
+  );
+}
+
+function XrayReport({ data, onReload, running = false, ranAt = null }) {
   const largest = data.largest || [];
   const flags = data.flags || [];
   const overlap = data.cross_broker_overlap || [];
@@ -148,7 +344,19 @@ function XrayReport({ data, onReload }) {
           <h2>Portfolio X-ray</h2>
           <span className="xray-badge">Intelligence</span>
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={onReload}>Recompute</button>
+        {/* The timestamp is what makes a successful run visible at all: the
+            numbers usually come back identical, so without it a working
+            recompute and a broken one look the same. */}
+        {ranAt && !running && (
+          <span className="xray-ran-at">Updated {ranAt.toLocaleTimeString()}</span>
+        )}
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={onReload}
+          disabled={running}
+        >
+          {running ? 'Recomputing…' : 'Recompute'}
+        </button>
       </header>
 
       {flags.length > 0 && (
@@ -156,6 +364,12 @@ function XrayReport({ data, onReload }) {
           {flags.map((f, i) => <li key={i}>{f}</li>)}
         </ul>
       )}
+
+      {/* Above the stat band on purpose. The bands and mixes answer "what is
+          this portfolio", which for a long-term holder is the same answer
+          every day; this answers "what has it become", which is the only
+          question on the page whose answer changed since the last visit. */}
+      <XrayDrift drift={data.drift} />
 
       <section className="stats-grid xray-band">
         <div className="stat-card">
@@ -265,9 +479,17 @@ function XrayReport({ data, onReload }) {
                 <span className={row.delta_pct >= 0 ? 'positive' : 'negative'}>{signedPct(row.delta_pct)}</span>
               </div>
             ))}
+            {/* The boundary, not just the method. This measures the invested
+                sleeve; the Holdings tab measures the whole portfolio with cash
+                in it. On a book that is a third cash the same year reads 3.5%
+                here and 2.3% there, and two screens disagreeing about one
+                number reads as a bug rather than as two questions. */}
             <div className="xray-foot">
-              Holdings-based — assumes today's positions held all period; deposits ignored.
-              Coverage {pct((benchmark.periods[benchmark.periods.length - 1] || {}).coverage)}.
+              Your holdings against the index, cash excluded — assumes today's
+              positions held all period; deposits ignored. Coverage{' '}
+              {pct((benchmark.periods[benchmark.periods.length - 1] || {}).coverage)}.
+              The Holdings tab measures the whole portfolio, so its figure is
+              this one diluted by whatever share you hold in cash.
             </div>
           </section>
         )}

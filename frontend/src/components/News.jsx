@@ -32,7 +32,7 @@ export function NewsView({ news, loading, onRefresh }) {
         <section className="panel">
           <div className="panel-header">
             <h2>Your Holdings</h2>
-            <span className="panel-note">headlines matching your tickers</span>
+            <span className="panel-note">headlines naming your holdings</span>
           </div>
           {loading && !news ? (
             <div className="empty-box">Loading…</div>

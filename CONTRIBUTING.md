@@ -25,7 +25,6 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt ruff pytest
 uvicorn backend.main:app --port 8890          # backend
 cd frontend && npm install && npm run dev      # web UI
-cd mobile && npm install && npx expo start     # mobile (optional)
 ```
 
 ## Quality gates (CI enforces these)
@@ -33,7 +32,6 @@ cd mobile && npm install && npx expo start     # mobile (optional)
 - `ruff check backend tests` — lint, import order, bugbear
 - `pytest -q` — the full suite must stay green; new behavior needs tests
 - `cd frontend && npm run build` — the web bundle must build
-- `cd mobile && npx tsc --noEmit` — the app must typecheck
 
 ## Ground rules
 
@@ -66,7 +64,7 @@ however you like.
 ## What we merge (and what we'll redirect)
 
 - **Wide open — please PR these:** connectors, bug fixes, docs, tests,
-  translations, mobile/web polish. This is the heart of the project.
+  translations, web polish. This is the heart of the project.
 - **Proposal first (open a Discussion before coding):** schema changes,
   analytics math, SDK surface changes — core stays deliberately small and
   maintainer-curated.

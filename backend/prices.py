@@ -72,15 +72,48 @@ def _fetch_quotes(positions: list[Position]) -> tuple[dict[str, tuple[float, str
     errors: list[str] = []
 
     if main:
-        connector = connectors.active_market_data()
-        if connector is None:
+        # The whole chain, not just the active one — the same shape
+        # fetch_history has used for a while. Providers differ in what they
+        # cover and in what their budget allows: one may price equities every
+        # minute and know nothing about mutual funds, another may cover
+        # everything on 250 calls a day. Asking each in turn for whatever the
+        # last could not answer gets a full book from parts that are each
+        # incomplete, and costs nothing when the first provider answers.
+        chain = connectors.market_data_chain()
+        if not chain:
             if not crypto:
                 return {}, [], "none"
             errors.append("No main market-data provider — only crypto refreshed via CoinGecko")
         else:
-            result = connector.refresh_prices(main)
-            prices.update(result.get("prices", {}))
-            errors.extend(result.get("errors", []))
+            outstanding = list(main)
+            answered_by: list[str] = []
+            for connector_id, connector in chain:
+                if not outstanding:
+                    break
+                try:
+                    result = connector.refresh_prices(outstanding)
+                except Exception as exc:                # never let one provider
+                    errors.append(f"{connector_id}: {exc!r}")   # end the sweep
+                    continue
+                got = result.get("prices", {}) or {}
+                prices.update(got)
+                if got:
+                    answered_by.append(connector_id)
+                # A provider's complaint survives the fallthrough. Prices
+                # arriving from the next one in the chain is resilience; a
+                # misconfigured key going unmentioned because something else
+                # covered for it is the silent kind of failure.
+                errors.extend(result.get("errors", []) or [])
+                outstanding = [p for p in outstanding if p.symbol not in prices]
+            if answered_by:
+                # Name every provider that contributed, not just the first: a
+                # book split across a fast quote feed and a fund-covering one
+                # is answered by both, and reporting one of them hides that.
+                provider_name = "+".join(answered_by)
+            if outstanding:
+                errors.append(
+                    f"No provider priced: {', '.join(sorted({p.symbol for p in outstanding})[:8])}"
+                )
 
     if crypto:
         result = crypto_connector.refresh_prices(crypto)
@@ -189,6 +222,77 @@ def _us_equity_market_open(now: datetime | None = None) -> bool:
     return (9 * 60 + 15) <= minutes <= (16 * 60 + 15)
 
 
+#: The fastest and slowest the sweep will ever run, whatever the arithmetic
+#: says. The floor is a minute because a portfolio tracker gains nothing from
+#: pricing faster than a person can look; the ceiling keeps a tiny plan from
+#: producing a cadence that reads as broken.
+SWEEP_SECONDS_MIN = 60
+SWEEP_SECONDS_MAX = 900
+
+#: Used when a provider declares no budget at all.
+SWEEP_SECONDS_DEFAULT = 300
+
+#: Share of a daily allowance the quote sweep may spend. The rest belongs to
+#: the daily history sweep, the X-ray's per-symbol fundamentals, and whatever
+#: a person's own Refresh costs — all of which come out of the same tier.
+_DAILY_BUDGET_SHARE = 0.6
+
+#: Minutes the US equity session runs, for turning a daily allowance into a
+#: cadence. _us_equity_market_open spans 9:15-16:15 ET.
+_SESSION_MINUTES = 7 * 60
+
+
+def sweep_interval_seconds(symbol_count: int | None = None) -> int:
+    """How often the deployment-wide quote sweep can afford to run.
+
+    Arithmetic rather than preference, and it has to be recomputed as a
+    deployment grows: the same plan that prices twenty-one symbols every
+    minute cannot price five hundred at all if the provider answers one symbol
+    per request. Asking the provider what a sweep costs, and what it is
+    allowed, is the only version of this that survives the book getting
+    bigger.
+
+    The best cadence any single provider in the chain can sustain wins, since
+    the chain stops as soon as one of them has answered.
+    """
+    try:
+        chain = connectors.market_data_chain()
+        if symbol_count is None:
+            symbol_count = len(db.list_tracked_symbols())
+    except Exception:
+        return SWEEP_SECONDS_DEFAULT
+    if not chain or symbol_count <= 0:
+        return SWEEP_SECONDS_DEFAULT
+
+    best: int | None = None
+    for _connector_id, connector in chain:
+        budget = getattr(connector, "quote_budget", None)
+        if budget is None:
+            continue
+        per_sweep = budget.requests_per_sweep(symbol_count)
+        if per_sweep <= 0:
+            continue
+
+        seconds: float = SWEEP_SECONDS_MIN
+        if budget.per_minute:
+            # Seconds between sweeps such that per_sweep requests fit the
+            # per-minute ceiling. A book too big for even one sweep a minute
+            # simply lands on a longer interval rather than failing.
+            seconds = max(seconds, 60.0 * per_sweep / budget.per_minute)
+        if budget.per_day:
+            affordable_sweeps = (budget.per_day * _DAILY_BUDGET_SHARE) / per_sweep
+            if affordable_sweeps <= 0:
+                continue
+            seconds = max(seconds, (_SESSION_MINUTES * 60.0) / affordable_sweeps)
+        if not budget.per_minute and not budget.per_day:
+            continue                      # declared nothing; claims nothing
+
+        candidate = int(min(max(seconds, SWEEP_SECONDS_MIN), SWEEP_SECONDS_MAX))
+        best = candidate if best is None else min(best, candidate)
+
+    return best if best is not None else SWEEP_SECONDS_DEFAULT
+
+
 def refresh_tracked_quotes() -> dict:
     """Price every symbol the deployment holds, once, into the shared cache.
 
@@ -208,10 +312,23 @@ def refresh_tracked_quotes() -> dict:
 
     cached = db.get_cached_quotes(tracked)
     market_open = _us_equity_market_open()
+
+    # A symbol someone else is already keeping current does not need buying
+    # from a provider. This is what makes an external feed — a relay posting
+    # to /prices/ingest — actually save anything: without it the sweep would
+    # keep paying for prices it already has, and the relay would only add
+    # freshness between sweeps rather than replacing them.
+    fresh_window = sweep_interval_seconds(len(tracked))
+
+    def already_current(key: tuple[str, str]) -> bool:
+        entry = cached.get(key)
+        return bool(entry) and _is_fresh(entry[2], fresh_window)
+
     work = [
         (symbol, asset_type)
         for symbol, asset_type in tracked
-        if asset_type == "crypto" or market_open or (symbol, asset_type) not in cached
+        if not already_current((symbol, asset_type))
+        and (asset_type == "crypto" or market_open or (symbol, asset_type) not in cached)
     ]
     skipped = len(tracked) - len(work)
     if not work:
@@ -323,7 +440,50 @@ def _effective_period(symbol: str, period: str, start_date: str, bounds: dict) -
     return period
 
 
-def fetch_price_history(period: str = "3m", refresh: bool = False) -> dict:
+#: Symbols no provider could serve, and when we last tried. A private
+#: placement like SPCX (SpaceX, offered by Robinhood) exists in someone's
+#: portfolio and in no market-data catalogue on earth, so every provider in the
+#: chain is asked for it, fails, retries across its mirrors, backs off, and
+#: fails again — on every single page load. One such holding cost ~7.9s per
+#: dashboard render with the cache otherwise fully warm.
+#:
+#: In process only and deliberately short-lived: a newly listed ticker must
+#: start working without a deploy, and a restart clears the slate.
+_MISS_TTL_SECONDS = 6 * 60 * 60
+_history_misses: dict[str, float] = {}
+
+
+def _recently_unfetchable(symbol: str) -> bool:
+    import time
+
+    stamp = _history_misses.get(symbol.upper())
+    return bool(stamp and time.time() - stamp < _MISS_TTL_SECONDS)
+
+
+def _remember_unfetchable(symbols: list[str]) -> None:
+    import time
+
+    now = time.time()
+    for symbol in symbols:
+        _history_misses[symbol.upper()] = now
+    if symbols:
+        logger = __import__("logging").getLogger(__name__)
+        logger.info(
+            "No provider has history for %s — not asking again for %d hours",
+            ", ".join(sorted(symbols)), _MISS_TTL_SECONDS // 3600,
+        )
+
+
+def forget_unfetchable(symbol: str | None = None) -> None:
+    """Clear the negative cache — a symbol, or all of it."""
+    if symbol is None:
+        _history_misses.clear()
+    else:
+        _history_misses.pop(symbol.upper(), None)
+
+
+def fetch_price_history(period: str = "3m", refresh: bool = False,
+                        extra_symbols: list[str] | None = None) -> dict:
     """Portfolio-wide daily closes for the trend chart + analytics.
 
     Cache-first: symbols whose cached series is fresh (newest point within
@@ -332,13 +492,20 @@ def fetch_price_history(period: str = "3m", refresh: bool = False) -> dict:
     hammered rate-limited providers with 10+ doomed requests per load.
     ``refresh=True`` (the explicit Refresh action) forces a provider pass;
     provider failures still fall back to whatever the cache has.
+
+    ``extra_symbols`` adds holdings that are no longer held. Reconstructed
+    history needs them: rewinding a sale puts the shares back, and a symbol
+    with no closes is silently worth nothing while its proceeds are rewound in
+    full, so a closed-out position becomes a step in the line. One 519-share
+    AFRM sale showed as a $49,538 jump in a single day that way.
     """
     positions = [
         position
         for position in db.list_positions()
         if position.asset_type not in {"cash", "option"}
     ]
-    symbols = sorted({position.symbol for position in positions})
+    symbols = sorted({position.symbol for position in positions}
+                     | {s.upper() for s in (extra_symbols or []) if s})
     provider_name = connectors.active_market_data_id()
 
     if not symbols:
@@ -348,11 +515,14 @@ def fetch_price_history(period: str = "3m", refresh: bool = False) -> dict:
     cached = db.get_cached_price_history(symbols, start_date)
 
     if refresh:
+        # An explicit Refresh is the user asking. Honour it even for symbols
+        # that have failed before — a listing may have appeared since.
         to_fetch = list(symbols)
     else:
         to_fetch = [
             symbol for symbol in symbols
-            if symbol not in cached or not _cache_is_fresh(cached[symbol], start_date)
+            if (symbol not in cached or not _cache_is_fresh(cached[symbol], start_date))
+            and not _recently_unfetchable(symbol)
         ]
 
     fetched: dict[str, dict] = {}
@@ -411,6 +581,10 @@ def fetch_price_history(period: str = "3m", refresh: bool = False) -> dict:
                     if not remaining:
                         break
                     remaining = _fetch_from(connector, remaining)
+                # Whatever the whole chain could not answer is not going to
+                # start working on the next page load. Stop asking for a while.
+                if remaining:
+                    _remember_unfetchable(remaining)
 
         # Persist fresh provider data so future loads survive rate limits.
         if fetched:
@@ -534,3 +708,70 @@ def fetch_symbol_history(symbol: str, asset_type: str = "stock", period: str = "
         "closes": series.get("closes", []),
         "errors": errors,
     }
+
+
+# --- corporate actions ------------------------------------------------------
+
+#: Splits are immutable historical facts, so this is cached for a long time and
+#: in process only. Getting it wrong in the stale direction costs at most a
+#: recently-announced split; a DB table and a migration would cost more than
+#: that is worth.
+_SPLIT_TTL_SECONDS = 24 * 60 * 60
+_split_cache: dict[str, tuple[float, list[tuple[str, float]]]] = {}
+
+
+def fetch_splits(symbols: list[str] | None = None) -> dict[str, list[tuple[str, float]]]:
+    """``{symbol: [(iso_date, ratio)]}`` for the portfolio's equities.
+
+    Used to restate historical trades into today's share units — see
+    ``backend.portfolio_history.daily_values``. A provider that cannot answer
+    (no such method, an outage, a rate limit) yields nothing rather than
+    raising: the reconstructed history is then wrong only for trades that
+    straddle a split, which is exactly where it was before this existed.
+    """
+    import time
+
+    positions = [
+        position
+        for position in db.list_positions(include_closed=True)
+        if position.asset_type not in {"cash", "option", "crypto"}
+    ]
+    by_symbol = {position.symbol: position for position in positions}
+    wanted = sorted(set(symbols) & by_symbol.keys()) if symbols else sorted(by_symbol)
+    if not wanted:
+        return {}
+
+    now = time.time()
+    result: dict[str, list[tuple[str, float]]] = {}
+    stale = []
+    for symbol in wanted:
+        cached = _split_cache.get(symbol)
+        if cached and now - cached[0] < _SPLIT_TTL_SECONDS:
+            if cached[1]:
+                result[symbol] = cached[1]
+        else:
+            stale.append(symbol)
+    if not stale:
+        return result
+
+    connector = connectors.active_market_data()
+    fetch = getattr(connector, "fetch_splits", None)
+    if fetch is None:
+        return result
+    try:
+        fetched = fetch(stale, by_symbol).get("splits", {})
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "split lookup failed; history will not restate pre-split trades"
+        )
+        return result
+    for symbol in stale:
+        events = fetched.get(symbol, [])
+        # Cached either way: a symbol with no splits is the common case and
+        # must not be re-requested on every page load.
+        _split_cache[symbol] = (now, events)
+        if events:
+            result[symbol] = events
+    return result

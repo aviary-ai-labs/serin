@@ -227,6 +227,9 @@ def test_yahoo_429_fails_over_to_query2(monkeypatch):
     """A 429 on query1 retries against the query2 mirror instead of failing."""
     import httpx
 
+    # Same reason as above: the batched quote would reach the network first.
+    monkeypatch.setattr(yahoo, "_batch_quotes", lambda _by_symbol: {})
+
     urls = []
     sleeps = []
 
@@ -257,6 +260,10 @@ def test_yahoo_429_fails_over_to_query2(monkeypatch):
 
 def test_yahoo_non_retryable_error_fails_immediately(monkeypatch):
     """A 404 is not retried — one attempt, clean error."""
+    # This test measures the per-symbol chart path. refresh_prices now
+    # tries a batched quote first, which would bootstrap a crumb over the
+    # network before the code under test ever runs.
+    monkeypatch.setattr(yahoo, "_batch_quotes", lambda _by_symbol: {})
     import httpx
 
     urls = []

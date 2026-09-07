@@ -126,3 +126,34 @@ def test_schedule_api_rejects_bad_input(tmp_path):
 
     assert client.put("/api/schedule", json={"enabled": True, "time": "25:00"}).status_code == 422
     assert client.put("/api/schedule", json={"enabled": True, "timezone": "Mars/Olympus"}).status_code == 422
+
+
+def test_position_price_sync_uses_any_age_cache_and_never_a_provider(tmp_path, monkeypatch):
+    """The per-user sync writes cached prices onto position rows. Cache-only
+    by design: the market-hours gating on the sweep is the provider budget,
+    and this sync must not leak around it — even when the cache is old."""
+    import asyncio
+
+    from backend import prices, scheduler
+    from backend.models import PositionIn
+
+    db.set_db_path(tmp_path / "sync.db")
+    db.init_db()
+    db.create_position(PositionIn(symbol="HOOD", name="HOOD", broker="x", asset_type="stock",
+                                  quantity=1, average_cost=100, current_price=69.36))
+    db.cache_quotes([("HOOD", "stock", 95.56, "")])
+    with db.connect() as conn:
+        conn.execute("UPDATE quotes SET updated_at='2020-01-01T00:00:00+00:00'")
+
+    def no_providers(*args, **kwargs):
+        raise AssertionError("the sync must never reach a provider")
+
+    monkeypatch.setattr(prices, "_fetch_quotes", no_providers)
+    scheduler._last_price_sync.clear()
+    asyncio.run(scheduler.maybe_sync_position_prices("owner-1"))
+    assert next(iter(db.list_positions())).current_price == 95.56
+
+    # Throttled: a second pass inside the window must not run at all — it
+    # would blow up if it did, because refresh_prices is now a tripwire too.
+    monkeypatch.setattr(prices, "refresh_prices", no_providers)
+    asyncio.run(scheduler.maybe_sync_position_prices("owner-1"))

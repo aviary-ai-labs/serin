@@ -20,16 +20,18 @@ import json
 import logging
 import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from backend import db
+from backend import db, scope, secrets_store
 from backend.config import settings
-from backend.models import PositionIn
+from backend.models import PositionIn, canonical_action
 
 logger = logging.getLogger(__name__)
 
 USER_SETTING_KEY = "snaptrade_user"
+# SnapTrade's error code for "registerUser is not available for personal keys".
+PERSONAL_KEY_CODE = "1012"
 LAST_SYNC_KEY = "snaptrade_last_sync"
 OCC_OPTION_RE = re.compile(r"^([A-Z0-9]{1,6})\s*(\d{6})([CP])(\d{8})$")
 
@@ -58,6 +60,27 @@ def resolved_credentials() -> tuple[str, str]:
     return client_id, consumer_key
 
 
+#: The paid add-on that unlocks brokerage sync on a hosted plan. Self-host is
+#: unaffected — someone running their own instance brings their own SnapTrade
+#: credentials and owes us nothing for using them.
+BROKER_SYNC_FEATURE = "broker_sync"
+
+
+def broker_sync_entitled() -> bool:
+    """Whether this account may use brokerage sync.
+
+    Only gated where Serin is the one paying SnapTrade. An open-source or
+    self-hosted instance has no verifier installed, so this is True and the
+    feature behaves exactly as it always has — the add-on exists to cover a
+    per-user cost that only a hosted deployment incurs.
+    """
+    from backend import entitlements
+
+    if entitlements.summary()["plan"] == "opensource":
+        return True
+    return entitlements.has(BROKER_SYNC_FEATURE)
+
+
 def snaptrade_available() -> bool:
     client_id, consumer_key = resolved_credentials()
     return bool(client_id and consumer_key)
@@ -73,6 +96,7 @@ def error_message(exc: Exception) -> str:
     """
     status = getattr(exc, "status", None)
     detail = ""
+    code = ""
     body = getattr(exc, "body", None)
     if body is not None:
         if isinstance(body, bytes | bytearray):
@@ -87,7 +111,18 @@ def error_message(exc: Exception) -> str:
                 detail = body.strip()[:200]
         if isinstance(body, dict):
             detail = str(body.get("detail") or body.get("message") or "").strip()
+            code = str(body.get("code") or "").strip()
 
+    if code == PERSONAL_KEY_CODE or (status == 400 and "personal" in detail.lower()):
+        # SnapTrade's free tier hands out one pre-provisioned user and refuses
+        # registerUser. Nothing is wrong with the keys — Serin just has to be
+        # told which user they came with, which lives in the same dashboard.
+        return (
+            "This is a personal SnapTrade key, which comes with one user "
+            "already created. Copy that user's ID and secret from your "
+            "SnapTrade dashboard into SNAPTRADE_USER_ID and "
+            "SNAPTRADE_USER_SECRET, then try again."
+        )
     if status in (401, 403):
         # Both credentials are sent on every call, so "not provided" upstream
         # means "not accepted" — say the actionable thing, not the literal one.
@@ -123,7 +158,27 @@ def _get_client():
     if _client is None or _client_creds != creds:
         from snaptrade_client import SnapTrade
 
-        _client = SnapTrade(consumer_key=consumer_key, client_id=client_id)
+        # SDK 13 made the Personal/Commercial split explicit at construction
+        # and stopped accepting bare consumer_key/client_id — passing them
+        # raises TypeError, which is what broke this integration silently when
+        # an unpinned rebuild pulled 13.x.
+        #
+        # Commercial is the right mode: Serin owns the SnapTrade account and
+        # registers one end-user per Serin account. Personal is for an
+        # individual connecting their own brokerages under their own key, and
+        # takes a different flow entirely (no user registration, no
+        # userSecret) — see docs/CONNECTORS.md.
+        try:
+            from snaptrade_client.auth import SnapTradeAuth
+
+            _client = SnapTrade(
+                auth=SnapTradeAuth.commercial_api_key(
+                    consumer_key=consumer_key, client_id=client_id
+                )
+            )
+        except ImportError:
+            # SDK 11/12, where auth modes did not exist yet.
+            _client = SnapTrade(consumer_key=consumer_key, client_id=client_id)
         _client_creds = creds
     return _client
 
@@ -186,14 +241,37 @@ def _unit_price(value: Any, asset_type: str) -> float:
     return price
 
 
+#: Keys SnapTrade wraps a collection in, newest first. `get_account_activities`
+#: answers {"data": [...], "pagination": {...}}; older endpoints use "results".
+_ENVELOPE_KEYS = ("data", "results", "items")
+
+
 def _response_rows(body: Any) -> list[Any]:
+    """The rows inside a SnapTrade response, whatever it wrapped them in.
+
+    The fallback used to be ``list(body)``, which on a dict yields its *keys*.
+    So an activities response of {"data": [623 trades], "pagination": {...}}
+    came back as the two strings "data" and "pagination", both were discarded
+    as unmappable, and the import reported success having stored nothing.
+    Every backfill silently did this — 720 activities across six accounts.
+
+    An unrecognised dict now returns nothing and says so, rather than
+    manufacturing rows out of key names.
+    """
     if body is None:
         return []
-    if isinstance(body, dict) and "results" in body:
-        results = body.get("results") or []
-        return results if isinstance(results, list) else [results]
     if isinstance(body, list):
         return body
+    if isinstance(body, dict):
+        for key in _ENVELOPE_KEYS:
+            if key in body:
+                value = body.get(key) or []
+                return value if isinstance(value, list) else [value]
+        logger.warning(
+            "Unrecognised SnapTrade response envelope with keys %s — returning no "
+            "rows rather than iterating key names", sorted(body)[:8],
+        )
+        return []
     try:
         return list(body)
     except TypeError:
@@ -205,6 +283,17 @@ def _response_rows(body: Any) -> list[Any]:
 
 
 def get_stored_user() -> dict | None:
+    """The SnapTrade end-user for the *current Serin account*.
+
+    app_settings is scoped by user_id, so one SnapTrade identity per Serin
+    account already falls out of the storage layer — the hosted requirement in
+    this module's docstring is half met by that alone.
+
+    The userSecret is decrypted on read. It is the credential that authorises
+    reading someone's brokerage holdings, and on Cloud it lives in a database
+    shared by every customer; plaintext there is a much larger promise than
+    plaintext on a box its owner controls.
+    """
     raw = db.get_setting(USER_SETTING_KEY)
     if not raw:
         return None
@@ -212,7 +301,25 @@ def get_stored_user() -> dict | None:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return None
+    secret = data.get("userSecret") or ""
+    if secret:
+        try:
+            data["userSecret"] = secrets_store.decrypt(secret)
+        except Exception:
+            # Written before this was encrypted, or written under a key this
+            # instance no longer has. Plaintext still works; a hard failure
+            # here would strand a working connection.
+            pass
     return data if data.get("userId") and data.get("userSecret") else None
+
+
+def _store_user(user: dict) -> None:
+    """Persist the end-user, encrypting the secret half."""
+    payload = dict(user)
+    secret = payload.get("userSecret") or ""
+    if secret and not secrets_store.is_encrypted(secret):
+        payload["userSecret"] = secrets_store.encrypt(secret)
+    db.set_setting(USER_SETTING_KEY, json.dumps(payload))
 
 
 def get_or_register_user() -> dict:
@@ -222,6 +329,19 @@ def get_or_register_user() -> dict:
     # Personal-tier keys: SnapTrade pre-provisions one user at signup and
     # blocks registerUser. Use the userId/userSecret from the dashboard.
     if settings.snaptrade_user_id and settings.snaptrade_user_secret:
+        # That pre-provisioned user is one brokerage identity, and this branch
+        # cannot see whose request it is serving. On a shared deployment every
+        # account would be handed the same one, so the first person to connect
+        # a broker would show their holdings to everybody else. Refuse rather
+        # than pool them; a shared deployment needs partner credentials, which
+        # register a separate SnapTrade user per account.
+        if scope.provider_installed():
+            raise SnapTradeError(
+                "SnapTrade is configured with a personal key, which carries a "
+                "single pre-provisioned user. This deployment has accounts "
+                "switched on, so that one user would be shared by everybody. "
+                "Broker sync here needs partner credentials from SnapTrade."
+            )
         user = {"userId": settings.snaptrade_user_id, "userSecret": settings.snaptrade_user_secret}
         db.set_setting(USER_SETTING_KEY, json.dumps(user))
         logger.info("Using pre-provisioned SnapTrade user %s", user["userId"])
@@ -233,7 +353,7 @@ def get_or_register_user() -> dict:
     user = {"userId": _g(response.body, "userId"), "userSecret": _g(response.body, "userSecret")}
     if not user["userId"] or not user["userSecret"]:
         raise SnapTradeError("SnapTrade registration did not return a user secret.")
-    db.set_setting(USER_SETTING_KEY, json.dumps(user))
+    _store_user(user)
     logger.info("Registered SnapTrade user %s", user["userId"])
     return user
 
@@ -441,18 +561,332 @@ _ACTIVITY_ACTIONS = {
     "BUY": "buy",
     "SELL": "sell",
     "DIVIDEND": "dividend",
-    "CONTRIBUTION": "cash_in",
-    "WITHDRAWAL": "cash_out",
+    # CONTRIBUTION and WITHDRAWAL are the two that cross the portfolio
+    # boundary, so they are the only ones TWR has to neutralise. Getting
+    # either wrong is the classic error: a contribution counted as growth
+    # makes saving look like skill.
+    "CONTRIBUTION": "deposit",
+    "DEPOSIT": "deposit",
+    "WITHDRAWAL": "withdrawal",
     "FEE": "fee",
+    "TAX": "tax",
+    "WITHHOLDING": "tax",
     "INTEREST": "interest",
     "REI": "buy",  # dividend reinvestment lands as a buy
+    # A transfer between two accounts Serin already tracks nets to nothing.
+    # Treating it as external would show a contribution on one side and a
+    # withdrawal on the other, moving total return for no reason.
     "TRANSFER": "transfer",
+    "STOCK_DIVIDEND": "adjustment",
+    "SPLIT": "split",
 }
 
 BACKFILL_REF_PREFIX = "snaptrade:"
 
+#: Activities page size. SnapTrade caps a page at 1000 and the endpoint is
+#: rate limited per account, so ask for the maximum and page as rarely as
+#: possible.
+_ACTIVITY_PAGE = 1000
 
-def backfill_transactions(days: int = 365) -> dict:
+
+def _day_key(symbol: str, action: str, occurred_at: str, broker: str = "") -> tuple:
+    """What makes two records the same real-world trading activity.
+
+    Not a row-level fingerprint, because the two sources do not agree on what
+    a row *is*. A broker CSV lists individual executions — 97 separate TQQQ
+    buys — while the API returns the order that produced them, one row of
+    43,101 shares at the average fill price. No amount of rounding on quantity
+    and price can reconcile those, and matching on them counted every
+    overlapping trade twice: TQQQ rewound to minus 15,500 shares against a
+    holding of 2,001.
+
+    A day is the unit both sources agree on. Twenty of the twenty-one
+    overlapping groups in the book that exposed this matched to the share on
+    (symbol, day, action) while their row counts differed by up to 97 to 1.
+
+    Carries the broker for the same reason the statement's span does: without
+    it, buying TQQQ at Fidelity on a day a Robinhood export happens to mention
+    TQQQ reads as the same trade, and the Fidelity purchase is silently
+    dropped.
+    """
+    return ((symbol or "").upper(), action, (occurred_at or "")[:10], broker)
+
+
+#: Cash events that both a statement and the API report, keyed the same way.
+#: Their magnitude is money rather than shares — a dividend has no quantity —
+#: so they are summed on amount. Six interest credits in the affected book
+#: appeared in both sources for the identical cent.
+_CASH_ACTIONS = frozenset({"dividend", "interest", "fee", "tax",
+                           "deposit", "withdrawal"})
+
+
+def _day_magnitude(transaction) -> float:
+    """Shares for a trade, money for a cash event."""
+    action = canonical_action(transaction.action)
+    if action in ("buy", "sell"):
+        return float(transaction.quantity or 0)
+    return abs(float(transaction.amount or 0))
+
+
+def _day_totals(transactions: list) -> dict[tuple, float]:
+    """Magnitude per ``(symbol, day, action)``, for comparing across sources.
+
+    Covers cash events as well as trades. Double-counted interest does not
+    drive share counts negative the way a duplicated buy does, so it fails
+    silently rather than loudly — which is the more dangerous of the two.
+    """
+    totals: dict[tuple, float] = {}
+    for t in transactions:
+        action = canonical_action(t.action)
+        if action in ("buy", "sell"):
+            if not t.symbol:
+                continue
+        elif action not in _CASH_ACTIONS:
+            continue
+        key = _day_key(t.symbol, action, t.occurred_at, t.broker)
+        totals[key] = totals.get(key, 0.0) + _day_magnitude(t)
+    return totals
+
+
+def _statement_ranges(transactions: list) -> dict[tuple, tuple[str, str]]:
+    """``(symbol, broker) -> (first day, last day)`` the statement covers.
+
+    Keyed by broker as well as symbol because a statement is one account's
+    activity export. Someone holding TQQQ at Robinhood and at Fidelity has a
+    Robinhood export that says nothing about the Fidelity lot, and letting its
+    date range suppress the other account's trades would delete real history
+    to fix an unrelated duplicate.
+    """
+    ranges: dict[tuple, list[str]] = {}
+    for t in transactions:
+        if canonical_action(t.action) not in ("buy", "sell") or not t.symbol:
+            continue
+        key = ((t.symbol or "").upper(), t.broker)
+        day = (t.occurred_at or "")[:10]
+        span = ranges.setdefault(key, [day, day])
+        span[0] = min(span[0], day)
+        span[1] = max(span[1], day)
+    return {k: (v[0], v[1]) for k, v in ranges.items()}
+
+
+def _covered_by_statement(ranges: dict[tuple, tuple[str, str]],
+                          symbol: str, broker: str, day: str) -> bool:
+    span = ranges.get(((symbol or "").upper(), broker))
+    return bool(span and span[0] <= (day or "")[:10] <= span[1])
+
+
+def _net_shares(transactions: list) -> float:
+    total = 0.0
+    for t in transactions:
+        action = canonical_action(t.action)
+        if action == "buy":
+            total += float(t.quantity or 0)
+        elif action == "sell":
+            total -= float(t.quantity or 0)
+    return total
+
+
+#: How far apart the two sources may date the same trade. Settlement lags
+#: execution by a day or two, and a statement that reports on one convention
+#: while the API reports on the other puts one sale on the 8th and the 9th.
+#: Four days spans a weekend without reaching the next week's trading.
+_SETTLEMENT_WINDOW_DAYS = 4
+
+
+def _vwap(rows: list) -> float:
+    shares = sum(abs(float(t.quantity or 0)) for t in rows)
+    if shares <= 0:
+        return 0.0
+    return sum(abs(float(t.quantity or 0)) * float(t.price or 0)
+               for t in rows) / shares
+
+
+def _group_trades(rows: list) -> dict[tuple, list]:
+    """``(symbol, broker, action, day) -> rows``, trades only."""
+    groups: dict[tuple, list] = {}
+    for t in rows:
+        action = canonical_action(t.action)
+        if action not in ("buy", "sell") or not t.symbol:
+            continue
+        key = ((t.symbol or "").upper(), t.broker, action, (t.occurred_at or "")[:10])
+        groups.setdefault(key, []).append(t)
+    return groups
+
+
+def _settlement_duplicates(statement_rows: list, broker_rows: list) -> list:
+    """Broker rows that are a statement day re-dated by a settlement lag.
+
+    The case neither day-matching nor span precedence can see: one AFRM sale
+    of 519 shares at $84.00, reported by the API as a single order on the 8th
+    and by the statement as three fills on the 9th. The two are outside each
+    other's day and outside the statement's one-day span, so both survived —
+    and $43,596 of proceeds became $87,191 of cash the account never held.
+
+    Demanding an exact share total *and* a matching average price makes this
+    narrow on purpose. Selling the same quantity of the same holding at the
+    same average price twice inside four days is possible; paying for it with
+    invented cash on every reconstruction is worse.
+    """
+    statement_groups = _group_trades(statement_rows)
+    claimed: set[tuple] = set()
+    duplicates: list = []
+
+    for key, rows in sorted(_group_trades(broker_rows).items()):
+        symbol, broker, action, day = key
+        try:
+            when = date.fromisoformat(day)
+        except ValueError:
+            continue
+        shares = sum(abs(float(t.quantity or 0)) for t in rows)
+        price = _vwap(rows)
+
+        for other, candidate in sorted(statement_groups.items()):
+            if other in claimed or other[:3] != (symbol, broker, action):
+                continue
+            try:
+                offset = abs((date.fromisoformat(other[3]) - when).days)
+            except ValueError:
+                continue
+            if offset > _SETTLEMENT_WINDOW_DAYS:
+                continue
+            other_shares = sum(abs(float(t.quantity or 0)) for t in candidate)
+            if abs(other_shares - shares) > 1e-6:
+                continue
+            other_price = _vwap(candidate)
+            tolerance = max(abs(other_price), abs(price)) * 0.005
+            if abs(other_price - price) > max(tolerance, 0.01):
+                continue
+            claimed.add(other)
+            duplicates.extend(rows)
+            break
+
+    return duplicates
+
+
+def repair_duplicate_backfill(dry_run: bool = True) -> dict[str, Any]:
+    """Remove the trades a pre-fix backfill double-counted.
+
+    The original check compared rows, and the two sources do not agree on what
+    a row is: a statement lists executions, the API lists the order behind
+    them. So trades the statement already held were imported a second time,
+    the ledger stopped agreeing with the holdings, the rewind subtracted more
+    shares than were ever owned, and reconstructed history went negative — one
+    book showed securities of -$496,746.85 on the first day of the year, drawn
+    as "+$1,059,137.85 (+0.00%)".
+
+    Two passes, because one is not enough and three would be guessing:
+
+    1. Inside the span a statement covers for a ``(symbol, broker)``, the
+       statement is the record. This catches what day-matching missed, where
+       the two sources dated the same trade differently — execution against
+       settlement.
+    2. If the symbol still does not reconcile to the position, and dropping
+       the remaining broker rows makes it reconcile exactly, they go too. Self-
+       validating: it acts only where it can show the result is right.
+
+    What is left after that is reported, never guessed at.
+    """
+    all_rows = db.list_transactions(limit=500_000)
+    statement_rows = [t for t in all_rows if t.source != "snaptrade"]
+    ranges = _statement_ranges(statement_rows)
+
+    held: dict[tuple, float] = {}
+    for position in db.list_positions(include_closed=True):
+        if position.asset_type in ("cash", "option"):
+            continue
+        key = ((position.symbol or "").upper(), position.broker)
+        held[key] = held.get(key, 0.0) + float(position.quantity or 0)
+
+    broker_trades: dict[tuple, list] = {}
+    for t in all_rows:
+        if t.source == "snaptrade" and t.symbol and \
+                canonical_action(t.action) in ("buy", "sell"):
+            broker_trades.setdefault(((t.symbol or "").upper(), t.broker), []).append(t)
+
+    doomed: list = []
+
+    # Pass 1b, before reconciliation: the same trade dated either side of a
+    # settlement lag. Reconciliation cannot catch these on a holding that was
+    # closed and removed, because there is no position left to anchor against
+    # — which is exactly where the AFRM sale hid.
+    already = {t.id for key, rows in broker_trades.items() for t in rows
+               if _covered_by_statement(ranges, key[0], key[1], t.occurred_at)}
+    doomed.extend(_settlement_duplicates(
+        statement_rows,
+        [t for rows in broker_trades.values() for t in rows if t.id not in already],
+    ))
+    settled = {t.id for t in doomed}
+
+    for key, rows in broker_trades.items():
+        symbol, broker = key
+        inside = [t for t in rows
+                  if _covered_by_statement(ranges, symbol, broker, t.occurred_at)]
+        outside = [t for t in rows
+                   if t not in inside and t.id not in settled]
+        doomed.extend(inside)
+
+        statement_net = _net_shares(
+            [t for t in statement_rows
+             if (t.symbol or "").upper() == symbol and t.broker == broker]
+        )
+        if key not in held:
+            # No position to reconcile against, so there is nothing to check
+            # the removal against either. Pass 2 would be guessing.
+            continue
+        position = held[key]
+        if abs(statement_net + _net_shares(outside) - position) <= 1e-6:
+            continue                       # reconciles once pass 1 is applied
+        if abs(statement_net - position) <= 1e-6 and outside:
+            # Dropping the rest makes it agree exactly. A duplicate the two
+            # sources dated either side of the statement's own span.
+            doomed.extend(outside)
+
+    # Cash events cannot be reconciled against a share count, so they keep the
+    # day match: interest credited twice on one date is the same credit.
+    cash_seen = _day_totals([t for t in all_rows if t.source != "snaptrade"])
+    for t in all_rows:
+        action = canonical_action(t.action)
+        if t.source == "snaptrade" and action in _CASH_ACTIONS and \
+                _day_key(t.symbol, action, t.occurred_at, t.broker) in cash_seen:
+            doomed.append(t)
+
+    removed = 0
+    if not dry_run:
+        for t in doomed:
+            if t.id and db.delete_transaction(t.id):
+                removed += 1
+
+    # Whatever still fails to reconcile, said plainly rather than papered over.
+    kept_ids = {t.id for t in doomed}
+    unresolved = []
+    for key, position in sorted(held.items()):
+        symbol, broker = key
+        rows = [t for t in all_rows
+                if (t.symbol or "").upper() == symbol and t.broker == broker
+                and canonical_action(t.action) in ("buy", "sell")
+                and t.id not in kept_ids]
+        if not rows:
+            # No ledger at all for this holding. That is the missing-history
+            # case data_gaps already names, with an action attached; repeating
+            # it here as a failed reconciliation buries the handful of
+            # symbols where a ledger exists and genuinely does not add up.
+            continue
+        net = _net_shares(rows)
+        if abs(net - position) > 1e-6:
+            unresolved.append({"symbol": symbol, "broker": broker,
+                               "ledger": round(net, 4),
+                               "held": round(position, 4)})
+
+    return {
+        "dry_run": dry_run,
+        "duplicate_rows": len(doomed),
+        "removed": removed,
+        "symbols": sorted({t.symbol for t in doomed}),
+        "unresolved": unresolved,
+    }
+
+
+def backfill_transactions(days: int | None = None) -> dict:
     """Pull broker activity history into the transactions table.
 
     Idempotent: every imported row is tagged ``snaptrade:<activity_id>`` in its
@@ -466,28 +900,93 @@ def backfill_transactions(days: int = 365) -> dict:
         raise SnapTradeError("No SnapTrade connection yet. Connect a brokerage first.")
     client = _get_client()
 
+    # No window by default. SnapTrade's activities endpoint returns *all*
+    # historical transactions for an account; start_date and end_date are
+    # optional filters. Asking for 365 days was our own limit, and it was the
+    # main reason a new customer's realized gains looked wrong: anything they
+    # bought more than a year ago and sold this year arrived as a sale with no
+    # purchase on record, so it could not be counted as gain at all.
     end = datetime.now(UTC).date()
-    start = end - timedelta(days=max(1, days))
-    response = client.transactions_and_reporting.get_activities(
-        user_id=user["userId"],
-        user_secret=user["userSecret"],
-        start_date=start.isoformat(),
-        end_date=end.isoformat(),
-    )
-    activities = _response_rows(response.body)
+    start = end - timedelta(days=max(1, days)) if days else None
 
-    existing_refs = {
-        t.notes for t in db.list_transactions(limit=100_000)
-        if t.notes.startswith(BACKFILL_REF_PREFIX)
-    }
+    # Activities are per *account*, not per user, and paginated at 1000 rows.
+    # The previous call — `transactions_and_reporting.get_activities` for the
+    # whole user — does not exist in SDK 13: the group was renamed and the
+    # endpoint moved under the account. It raised AttributeError before any
+    # request went out, so the button failed with a generic 502 that looked
+    # like a SnapTrade outage. Same shape as the SDK 13 constructor change.
+    activities: list = []
+    for account in list_accounts():
+        account_id = account.get("id")
+        if not account_id:
+            continue
+        offset = 0
+        while True:
+            request = {
+                "account_id": account_id,
+                "user_id": user["userId"],
+                "user_secret": user["userSecret"],
+                "end_date": end.isoformat(),
+                "offset": offset,
+                "limit": _ACTIVITY_PAGE,
+            }
+            if start is not None:
+                request["start_date"] = start.isoformat()
+            response = client.account_information.get_account_activities(**request)
+            page = _response_rows(response.body)
+            activities.extend(page)
+            # A short page is the last page. Guard the equal case too: a full
+            # page with no further rows would otherwise loop once more and
+            # come back empty, which is harmless but wastes a rate-limited
+            # call per account.
+            if len(page) < _ACTIVITY_PAGE:
+                break
+            offset += len(page)
 
+    # Cross-source duplicates. The database's unique index catches a *repeat*
+    # backfill, because those carry the same snaptrade: reference — but it
+    # cannot see that a trade already arrived from a broker CSV, which is
+    # fingerprinted differently. Importing a year of activity on top of an
+    # imported statement would double every overlapping buy and sell, and a
+    # doubled trade corrupts share counts, returns and coverage at once.
+    # Deliberately excludes rows this backfill wrote before: a repeat run is
+    # already caught by the unique index on the snaptrade: reference, and it
+    # should report as "already on record" rather than as a collision with a
+    # statement. Letting the content check fire first would relabel every
+    # re-run as a cross-source duplicate and hide whether anything actually
+    # overlapped.
+    # Keyed by day, not by row. The statement lists executions and the API
+    # lists the orders behind them, so no row-level fingerprint can match the
+    # two: a day the statement covers as 97 separate TQQQ buys arrives here as
+    # a single 43,101-share order. Comparing rows imported every overlapping
+    # trade a second time and drove the reconstruction negative.
+    # One read, two questions: which days the statement already accounts for,
+    # and which spans it is authoritative over.
+    statement_rows = [t for t in db.list_transactions(limit=100_000)
+                      if t.source != "snaptrade"]
+    existing = _day_totals(statement_rows)
+    # Shares the broker reports on a day the statement already covers, so the
+    # two can be compared after the fact. Skipping is the safe direction — a
+    # missed fill can be imported later, whereas a double-counted one corrupts
+    # every reconstructed figure at once — but it must not be silent.
+    seen_on_covered_days: dict[tuple, float] = {}
+    statement_ranges = _statement_ranges(statement_rows)
+
+    # Deduplication is the database's, via the partial unique index on
+    # (user_id, external_id). The previous approach loaded every transaction
+    # this account had ever recorded and string-matched their notes — O(n) on
+    # each backfill, and two syncs running at once would both pass the check
+    # and both insert.
     imported = 0
     skipped_existing = 0
     skipped_unknown = 0
+    skipped_duplicate = 0
     for activity in activities:
         activity_id = str(_g(activity, "id", default="") or "")
         ref = f"{BACKFILL_REF_PREFIX}{activity_id}"
-        if not activity_id or ref in existing_refs:
+        if not activity_id:
+            # Without the broker's own id there is nothing stable to dedupe
+            # on, and importing it would duplicate on the next sync.
             skipped_existing += 1
             continue
         raw_type = str(_g(activity, "type", default="") or "").upper()
@@ -510,8 +1009,33 @@ def backfill_transactions(days: int = 365) -> dict:
             # non-share transactions (see db._derive_amount).
             price = amount or price
 
+        day_key_early = _day_key(symbol, action, occurred, broker)
+        if action in ("buy", "sell") and _covered_by_statement(
+                statement_ranges, symbol, broker, occurred):
+            if day_key_early in existing:
+                seen_on_covered_days[day_key_early] = (
+                    seen_on_covered_days.get(day_key_early, 0.0) + units
+                )
+            # The statement is this account's complete activity export for the
+            # period it spans, so inside that span it is the record — matching
+            # day by day missed the trades the two sources dated differently,
+            # settlement against execution, and those were still counted twice.
+            skipped_duplicate += 1
+            continue
+
+        day_key = _day_key(symbol, action, occurred, broker)
+        if day_key in existing:
+            # The statement already covers this symbol on this day. Its rows
+            # are finer-grained and were there first, so they stand.
+            seen_on_covered_days[day_key] = (
+                seen_on_covered_days.get(day_key, 0.0)
+                + (units if action in ("buy", "sell") else abs(amount or price))
+            )
+            skipped_duplicate += 1
+            continue
+
         try:
-            db.create_transaction(
+            created = db.create_transaction(
                 TransactionIn(
                     symbol=symbol,
                     broker=broker,
@@ -524,19 +1048,45 @@ def backfill_transactions(days: int = 365) -> dict:
                     notes=ref,
                 ),
                 source="snaptrade",
+                external_id=ref,
             )
-            existing_refs.add(ref)
+            if created is None:
+                skipped_existing += 1
+                continue
             imported += 1
         except Exception:
             logger.warning("Skipping unmappable SnapTrade activity %s", activity_id, exc_info=True)
             skipped_unknown += 1
 
+    logger.info(
+        "SnapTrade backfill: %d imported, %d already imported, %d matched an "
+        "existing row from another source, %d unmappable",
+        imported, skipped_existing, skipped_duplicate, skipped_unknown,
+    )
+    # Sweep what the row-by-row checks structurally cannot see: the same trade
+    # dated either side of a settlement lag, which needs both sides in hand to
+    # recognise. Idempotent and conservative, so running it here costs nothing
+    # on a clean import and stops the next sync reintroducing $43,596 of
+    # proceeds as $87,191 of cash.
+    swept = repair_duplicate_backfill(dry_run=False) if imported else {"removed": 0}
+
+    disagreements = [
+        {"symbol": key[0], "action": key[1], "date": key[2], "broker": key[3],
+         "statement": round(existing[key], 4),
+         "broker_shares": round(shares, 4)}
+        for key, shares in sorted(seen_on_covered_days.items())
+        if abs(shares - existing[key]) > 1e-6
+    ]
+
     return {
         "imported": imported,
         "skipped_existing": skipped_existing,
+        "skipped_duplicate": skipped_duplicate,
         "skipped_unknown": skipped_unknown,
+        "disagreements": disagreements,
+        "swept_duplicates": swept.get("removed", 0),
         "window_days": days,
-        "from": start.isoformat(),
+        "from": start.isoformat() if start else "",
         "to": end.isoformat(),
     }
 
@@ -567,6 +1117,92 @@ def get_last_sync() -> dict | None:
         return None
 
 
+def _mask_number(number: str | None) -> str:
+    """Last four digits only.
+
+    Brokers are inconsistent about what they hand back — Fidelity pre-masks to
+    "*****6905" while Robinhood returns the number whole — so the masking
+    happens here rather than being trusted to the upstream. Four digits is
+    enough to tell two accounts apart, which is all this screen needs it for.
+    """
+    digits = "".join(ch for ch in str(number or "") if ch.isdigit())
+    # Only when the tail is actually digits. E*Trade returns an internal
+    # identifier here rather than an account number, and masking it produced
+    # "\u2022\u2022\u2022\u2022JlsQ" — which looks like data and is not. Showing nothing
+    # is better than showing something a person cannot check against a
+    # statement.
+    return f"\u2022\u2022\u2022\u2022{digits[-4:]}" if len(digits) >= 4 else ""
+
+
+#: raw_type/meta.type as brokers spell it, in the words a statement uses.
+_ACCOUNT_TYPE_LABELS = {
+    "INDIVIDUAL": "Individual",
+    "ROTH_IRA": "Roth IRA",
+    "TRADITIONAL_IRA": "Traditional IRA",
+    "DIGITALASSET": "Crypto",
+    "JOINT": "Joint",
+    "MARGIN": "Margin",
+    "CASH": "Cash",
+}
+
+
+def _synced_at(sync_status: Any, feature: str) -> str:
+    block = (sync_status or {}).get(feature) if isinstance(sync_status, dict) else None
+    if not isinstance(block, dict):
+        return ""
+    return str(block.get("last_successful_sync") or "")
+
+
+def accounts() -> list[dict]:
+    """Every connected account, one row each.
+
+    Serin's own tables key on broker, so three institutions collapse six real
+    accounts into three rows: an IRA, a crypto account and a taxable account at
+    one broker are indistinguishable once their holdings land. This reads the
+    accounts themselves so the connection screen can show what a person
+    actually recognises — the account they opened, its last four digits, and
+    what it is worth.
+    """
+    user = get_stored_user()
+    if not user:
+        return []
+    client = _get_client()
+    rows = _response_rows(
+        client.account_information.list_user_accounts(
+            user_id=user["userId"], user_secret=user["userSecret"]).body
+    )
+
+    out: list[dict] = []
+    for row in rows:
+        balance = _g(row, "balance", "total", default={}) or {}
+        raw_type = str(_g(row, "meta", "type", default="")
+                       or _g(row, "raw_type", default="") or "").upper()
+        institution = str(_g(row, "institution_name", default="") or "")
+        out.append({
+            "id": str(_g(row, "id", default="") or ""),
+            "institution": _slug_broker(institution),
+            "institution_name": institution,
+            "name": str(_g(row, "name", default="") or institution),
+            "number": _mask_number(_g(row, "number", default="")),
+            # An unmapped code is only worth showing if it reads as a word.
+            # Fidelity sends raw_type "I", which rendered as an account type
+            # of "I" beside the balance.
+            "type": _ACCOUNT_TYPE_LABELS.get(
+                raw_type,
+                raw_type.title().replace("_", " ") if len(raw_type) > 2 else "",
+            ),
+            "value": _float(balance.get("amount") if isinstance(balance, dict) else 0),
+            "currency": str((balance or {}).get("currency") or "USD"),
+            "status": str(_g(row, "status", default="") or ""),
+            "linked_at": str(_g(row, "created_date", default="") or "")[:10],
+            "holdings_synced_at": _synced_at(_g(row, "sync_status", default={}), "holdings"),
+            "transactions_synced_at": _synced_at(
+                _g(row, "sync_status", default={}), "transactions"),
+        })
+    out.sort(key=lambda a: (a["institution_name"], -a["value"]))
+    return out
+
+
 def status() -> dict:
     """Lightweight status for the UI (no network calls unless registered)."""
     if not snaptrade_available():
@@ -578,9 +1214,25 @@ def status() -> dict:
             connections = list_connections()
         except Exception as exc:  # surface as empty list; UI shows a sync error separately
             logger.warning("Could not list SnapTrade connections: %s", exc)
+
+    # Whether each connection has actually produced holdings yet. Connecting a
+    # broker and syncing it are two separate acts — the portal hands back an
+    # authorization, and nothing pulls positions until something asks. Without
+    # this the UI cannot tell "connected, nothing here yet" from "connected and
+    # genuinely empty", so a fresh connection looked like a silent failure.
+    synced_brokers: set[str] = set()
+    for position in db.list_positions(include_closed=True):
+        if position.source == "snaptrade":
+            synced_brokers.add(position.broker)
+    for connection in connections:
+        connection["synced"] = _slug_broker(
+            str(connection.get("institution") or "")
+        ) in synced_brokers
+
     return {
         "configured": True,
         "registered": registered,
         "connections": connections,
+        "pending_sync": any(not c.get("synced") for c in connections),
         "last_sync": get_last_sync(),
     }

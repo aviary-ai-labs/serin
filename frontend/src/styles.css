@@ -4,30 +4,31 @@
    Spec: docs/DESIGN-BRIEF.md + design handoff "Calm Dashboard".
    ================================================================= */
 
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap');
 
 :root {
-  --bg: #f3f4f7;
-  --card: #ffffff;
-  --ink: #181b22;
-  --sec: #5c636e;
-  --mut: #9097a1;
-  --bd: #e9eaee;
-  --inset: #f3f4f7;
-  --acc: #2f6bed;
-  --up: #15a05a;
-  --down: #e0453a;
+  --bg: #f3f0e8;
+  --card: #fbf8f1;
+  --ink: #17231f;
+  --sec: #53605b;
+  --mut: #7d8781;
+  --bd: #c8c2b4;
+  --inset: #ece8de;
+  --acc: #016558;
+  --up: #13795f;
+  --down: #d2493d;
 
-  --shadow-card: 0 1px 2px rgba(20, 24, 34, 0.04), 0 4px 14px rgba(20, 24, 34, 0.04);
-  --shadow-cta: 0 1px 2px rgba(47, 107, 237, 0.25);
+  --shadow-card: 0 1px 2px rgba(23, 35, 31, 0.035);
+  --shadow-cta: 0 1px 2px rgba(1, 101, 88, 0.2);
   --shadow-pill: 0 1px 3px rgba(20, 24, 34, 0.12);
 
-  --r-card: 18px;
+  --r-card: 16px;
   --r-btn: 11px;
   --r-chip: 8px;
   --r-pill: 999px;
 
-  --font: 'Manrope', -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font: 'DM Sans', -apple-system, system-ui, 'Segoe UI', sans-serif;
+  --font-display: 'Instrument Serif', Georgia, serif;
 
   /* Legacy aliases so any leftover references keep rendering during the
      redesign. Remove once the migration is fully audited. */
@@ -47,6 +48,212 @@
   --accent-blue: var(--acc);
   --accent-amber: #b97f17;
   --accent-amber-bg: #fbf1d5;
+}
+
+/* =================================================================
+   Serin Jade — approved 2026 visual direction
+   UI-led on the web; the bird appears only as a small brand companion.
+   ================================================================= */
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  background: var(--bg);
+}
+
+.app-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding: 30px 24px 24px;
+  background: var(--acc);
+  color: #fffaf1;
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+}
+
+.app-container.app-main {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+  padding: 30px 40px 54px;
+}
+
+.sidebar-brand {
+  color: #fffaf1;
+  font-size: 38px;
+  line-height: 1;
+  letter-spacing: -0.055em;
+  gap: 9px;
+}
+
+.serin-bird { display: block; overflow: visible; }
+.serin-bird .bird-body { fill: #e4d735; }
+.serin-bird .bird-tail { fill: #e2c93e; }
+.serin-bird .bird-wing { fill: #8eaa32; }
+.serin-bird .bird-beak { fill: #f36b49; }
+.serin-bird .bird-highlight { fill: #fff3a7; opacity: .55; }
+.serin-bird .bird-eye { fill: #123a32; }
+.serin-bird .bird-stroke { fill: none; stroke: #123a32; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+.brand-bird { width: 44px; height: 31px; transform: translateY(2px); }
+.app-sidebar .sidebar-brand,
+.app-sidebar .sidebar-brand span { color: #fffaf1; }
+
+.instance-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 21px;
+  border: 1px solid rgba(255,255,255,.34);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  color: rgba(255,255,255,.9);
+}
+.instance-chip i { width: 8px; height: 8px; border-radius: 50%; background: #a8d575; }
+
+.sidebar-nav { display: grid; gap: 8px; margin-top: 31px; }
+.sidebar-nav button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  border: 0;
+  border-radius: 13px;
+  padding: 13px 15px;
+  color: rgba(255,255,255,.9);
+  background: transparent;
+  font-size: 15px;
+  font-weight: 570;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-nav button:hover { background: rgba(255,255,255,.1); }
+.sidebar-nav button.active { background: var(--card); color: var(--ink); }
+.sidebar-nav-icon { width: 21px; height: 21px; flex: none; }
+.sidebar-count { margin-left: auto; min-width: 20px; padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,.18); text-align: center; font-size: 11px; }
+.sidebar-nav .active .sidebar-count { background: var(--inset); color: var(--acc); }
+
+.sidebar-foot { margin-top: auto; padding-top: 20px; border-top: 1px solid rgba(255,255,255,.28); display: grid; gap: 14px; }
+.sidebar-profile { display: flex; gap: 10px; align-items: center; min-width: 0; font-size: 12px; color: rgba(255,255,255,.86); }
+.sidebar-profile > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-avatar { width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,.55); display: grid; place-items: center; flex: none; }
+.sidebar-signout { display: flex; align-items: center; gap: 10px; border: 0; background: transparent; color: rgba(255,255,255,.88); padding: 8px 0; cursor: pointer; font-size: 13px; }
+
+.page-header {
+  min-height: 66px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 22px;
+}
+.page-heading h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(38px, 4vw, 48px);
+  line-height: .96;
+  font-weight: 400;
+  letter-spacing: -.025em;
+}
+.page-heading p { margin: 8px 0 0; color: var(--sec); font-size: 13.5px; }
+.header-actions { align-self: flex-start; }
+
+.btn, .currency-select, .search-input, select, input, textarea { border-color: var(--bd); }
+.btn { color: var(--ink); background: var(--card); box-shadow: none; }
+.btn:hover:not(:disabled) { background: #f1ede4; border-color: #a9a394; }
+.btn-primary { color: #fff; background: var(--acc); border-color: var(--acc); box-shadow: var(--shadow-cta); }
+.btn-primary:hover:not(:disabled) { background: #014d43; border-color: #014d43; }
+.currency-select { background: var(--card); color: var(--ink); }
+
+.card, .panel, .kpi, .stat-card, .performance-card, .stock-card {
+  background: var(--card);
+  border-color: var(--bd);
+  box-shadow: var(--shadow-card);
+}
+
+.stats-grid, .stat-grid { grid-template-columns: 1.55fr .95fr .95fr .95fr; gap: 16px; }
+.stat-card { position: relative; min-height: 154px; padding: 22px 24px; overflow: hidden; }
+.stat-label { color: var(--sec); font-weight: 520; margin-bottom: 13px; }
+.stat-value { font-size: clamp(27px, 2.3vw, 37px); font-weight: 680; letter-spacing: -.035em; }
+.stat-sub { margin-top: 9px; font-size: 14px; }
+.stat-meta { margin-top: 4px; color: var(--sec); font-size: 12.5px; }
+.card-bird { position: absolute; right: 17px; bottom: 5px; width: 49px; height: 44px; color: var(--ink); opacity: .88; }
+
+.panel-title, .panel-header h2, .chart-title, .sidebar-title,
+.performance-head h2, .stock-explorer-head h2, .briefing-history h2,
+.xray-section-title, .connector-group-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -.01em;
+}
+
+.overview-grid { grid-template-columns: minmax(0, 1.65fr) minmax(300px, .85fr); gap: 18px; }
+.sidebar-col { gap: 14px; }
+.chart-panel, .portfolio-chart { border-color: var(--bd); box-shadow: none; }
+.segmented { background: var(--inset); border: 1px solid var(--bd); padding: 0; gap: 0; overflow: hidden; }
+.segmented button { border-radius: 0; border-right: 1px solid var(--bd); min-height: 34px; }
+.segmented button:last-child { border-right: 0; }
+.segmented button.active { background: var(--acc); color: #fff; box-shadow: none; }
+
+.stock-explorer, .performance-panel { background: transparent; border: 0; box-shadow: none; }
+.stock-explorer { padding: 0; }
+.stock-grid { gap: 16px; }
+.stock-card { border-radius: 15px; }
+.stock-card:hover { border-color: var(--acc); transform: translateY(-1px); box-shadow: 0 8px 24px rgba(1,77,67,.07); }
+.stock-card-sector { background: var(--inset); color: var(--sec); }
+
+.briefing-hero {
+  background: var(--card);
+  border: 1px solid var(--bd);
+  border-radius: var(--r-card);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+.briefing-hero h2 { display: none; }
+.briefing-hero p { max-width: 680px; color: var(--sec); font-size: 13px; margin-top: 0; }
+.briefing-cover { position: relative; background: transparent; }
+.briefing-cover h1 { font-family: var(--font-display); font-weight: 400; letter-spacing: -.025em; }
+.briefing-bird { position: absolute; right: 25px; top: 18px; width: 52px; height: 46px; color: var(--ink); opacity: .85; }
+.briefing-kicker { color: var(--acc); }
+.briefing-reader { background: var(--card); }
+.briefing-row.active { background: #e1ece7; border-color: #8fb6aa; }
+
+.news-grid { gap: 18px; }
+.news-item { border-color: var(--bd); }
+.news-item strong { font-family: var(--font-display); font-size: 20px; font-weight: 400; line-height: 1.18; }
+.ticker-chip { color: var(--acc); border-color: #8fb6aa; background: #e1ece7; }
+
+.footer-note { border-top-color: var(--bd); color: var(--mut); }
+.notice-banner { border-color: var(--bd); box-shadow: none; }
+
+@media (max-width: 1120px) {
+  .app-shell { grid-template-columns: 212px minmax(0, 1fr); }
+  .app-sidebar { padding-left: 18px; padding-right: 18px; }
+  .app-container.app-main { padding-left: 25px; padding-right: 25px; }
+  .stats-grid, .stat-grid { grid-template-columns: 1fr 1fr; }
+  .overview-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 760px) {
+  .app-shell { display: block; }
+  .app-sidebar { position: relative; height: auto; padding: 16px; }
+  .app-sidebar > div:first-child { display: flex; align-items: center; justify-content: space-between; }
+  .sidebar-brand { font-size: 29px; }
+  .instance-chip { margin-top: 0; }
+  .sidebar-nav { display: flex; overflow-x: auto; margin-top: 15px; gap: 5px; padding-bottom: 2px; }
+  .sidebar-nav button { width: auto; flex: none; padding: 9px 12px; font-size: 13px; }
+  .sidebar-nav-icon { width: 18px; height: 18px; }
+  .sidebar-count, .sidebar-foot { display: none; }
+  .app-container.app-main { padding: 22px 16px 42px; }
+  .page-header { display: block; }
+  .header-actions { margin-top: 18px; margin-left: 0; }
+  .stats-grid, .stat-grid { grid-template-columns: 1fr; }
+  .stat-card { min-height: 132px; }
 }
 
 * { box-sizing: border-box; }
@@ -383,6 +590,13 @@ a:hover { text-decoration: underline; }
   line-height: 1.45;
   margin: -2px 0 0;
 }
+
+/* The full stock chart inside the narrow inspector column: stack the readout
+   over the controls and let the period buttons wrap. */
+.inspector-chart { margin-bottom: 10px; }
+.inspector-chart .stock-chart-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+.inspector-chart .stock-chart-controls { flex-wrap: wrap; }
+.inspector-chart .stock-chart-price { font-size: 20px; }
 .lock-google {
   display: flex; align-items: center; justify-content: center; gap: 9px;
   font-family: var(--font); font-size: 14px; font-weight: 700;
@@ -1142,21 +1356,29 @@ a:hover { text-decoration: underline; }
 .xray-bar-val { font-size: 12px; font-weight: 600; color: var(--sec); text-align: right; }
 .xray-sector-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--sec); font-weight: 500; }
 .xray-flags { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-/* A risk flag is the one thing on this page that should stop you. It read as
-   a pale grey-red stripe; now it carries a mark and a weighted edge. */
+/* Observations, not incidents.
+   These were three stacked red alert cards with white-on-red "!" badges. The
+   trouble is what they say: a cash weight, a beta, a benchmark gap. Those are
+   standing characteristics of a portfolio, true again every time the page
+   loads — so the alarm never clears, and a warning that is always on is one
+   nobody reads. Worse, it made an ordinary diagnostic panel look like
+   something had gone wrong.
+   So they read as findings: normal ink on a quiet surface, with a single
+   small mark carrying the severity. Still the first thing scanned on the
+   page, without claiming to be an emergency. */
 .xray-flags li {
   display: flex; align-items: flex-start; gap: 10px;
-  font-size: 13px; font-weight: 600; line-height: 1.45; color: #a82a1e;
-  background: var(--down-soft, rgba(224,69,58,0.07));
-  border: 1px solid rgba(224,69,58,0.16);
-  border-left: 3px solid var(--down);
+  font-size: 13px; font-weight: 600; line-height: 1.45; color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--bd);
   border-radius: 11px; padding: 11px 14px;
 }
+/* A small ring rather than a filled badge — present at a glance, but it does
+   not shout across the row the way solid red on white did. */
 .xray-flags li::before {
-  content: "!"; flex: none;
-  width: 17px; height: 17px; margin-top: 1px; border-radius: 50%;
-  background: var(--down); color: #fff;
-  font-size: 11px; font-weight: 800; line-height: 17px; text-align: center;
+  content: ""; flex: none;
+  width: 7px; height: 7px; margin-top: 6px; border-radius: 50%;
+  background: var(--down); opacity: 0.75;
 }
 .xray-factor-grid { display: flex; flex-wrap: wrap; gap: 6px 22px; }
 .xray-factor-cell { display: flex; flex-direction: column; gap: 1px; }
@@ -1269,6 +1491,111 @@ a:hover { text-decoration: underline; }
   font-size: 12px; font-weight: 600; line-height: 1.35; color: #b13023;
   background: var(--down-soft, rgba(224, 69, 58, 0.09)); border-radius: 9px; padding: 7px 10px;
 }
+/* Drift is news, not an alarm — accent, never the flags' red. The whole point
+   of the line is that it is different from last time, and dressing every
+   change as a warning would teach the reader to skip it. */
+.xray-teaser-drift {
+  font-size: 12px; font-weight: 600; line-height: 1.35; color: var(--ink);
+  background: var(--acc-soft); border-radius: 9px; padding: 7px 10px;
+}
+
+/* Drift — the report's lede. Full width above the stat band, because it is
+   the one section whose answer changed since the last visit. */
+.xray-drift { display: flex; flex-direction: column; gap: 13px; padding: 20px 22px 22px; margin: 0; }
+.xray-drift-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.xray-drift .xray-bars-title {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 14.5px; font-weight: 800; color: var(--ink);
+  text-transform: none; letter-spacing: -0.015em;
+}
+.xray-drift .xray-bars-title::before {
+  content: ""; flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--acc);
+}
+.xray-drift-span { font-size: 11.5px; font-weight: 600; color: var(--mut); font-variant-numeric: tabular-nums; }
+.xray-drift-quiet { gap: 8px; }
+
+/* The sentences. Same weight as a risk flag so they are read, accent-toned so
+   they are not mistaken for one. */
+.xray-drift-lede { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.xray-drift-lede li {
+  display: flex; align-items: flex-start; gap: 10px;
+  font-size: 13.5px; font-weight: 600; line-height: 1.45; color: var(--ink);
+  background: var(--acc-soft); border-left: 3px solid var(--acc);
+  border-radius: 11px; padding: 11px 14px;
+}
+/* No glyph: the sentence goes both ways — "has slipped from 24% to 20%" under
+   a rising arrow contradicts itself — and the accent edge already marks it. */
+.xray-drift-lede li::before { content: none; }
+
+.xray-drift-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.xray-drift-metric {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--inset); border-radius: 12px; padding: 12px 14px 10px;
+}
+.xray-drift-metric .stat-label {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; color: var(--mut);
+}
+.xray-drift-metric-value {
+  display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; font-variant-numeric: tabular-nums;
+}
+.xray-drift-metric-value strong { font-size: 19px; font-weight: 800; letter-spacing: -0.025em; color: var(--ink); }
+.xray-drift-then { font-size: 12.5px; font-weight: 600; color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Ink, not red and green. The benchmark rows earn those colours because they
+   report gains and losses; a sector falling from 24% to 20% of the book is
+   neither, and borrowing the palette would tell the reader to go fix it. The
+   arrow carries the direction on its own. */
+.xray-drift-delta { font-size: 12px; font-weight: 800; color: var(--sec); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.xray-spark { width: 100%; height: 22px; display: block; }
+.xray-spark polyline { fill: none; stroke: var(--acc); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.xray-spark line { stroke: var(--mut); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.45; }
+
+.xray-drift-cols { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 26px; }
+.xray-drift-col { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.xray-drift-subtitle {
+  font-size: 11px; font-weight: 700; color: var(--mut);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+/* Name, bar, where it was, where it is, the move, why. Six columns is a lot
+   for one row, so everything but the bar is sized to its content and the bar
+   absorbs the slack. */
+.xray-drift-row {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(40px, 1fr) auto 46px 62px minmax(0, max-content);
+  align-items: center; gap: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.xray-drift-row .xray-bar-track { display: flex; height: 9px; }
+/* The stretch that was already there a year ago is muted; the cap is the
+   change, and the change is what the panel is for. Drawn the other way round
+   — full-strength base, accent cap — the cap landed on the green end of the
+   fill's own gradient and disappeared into it. */
+.xray-drift-row .xray-bar-fill { border-radius: 999px 0 0 999px; background: var(--acc); opacity: 0.3; }
+.xray-drift-cap { display: block; height: 100%; border-radius: 0 999px 999px 0; }
+.xray-drift-cap.grew { background: var(--acc); }
+/* Hatched rather than a second colour: the weight that left is not there any
+   more, and a solid block says it still is. */
+.xray-drift-cap.shrank { background: repeating-linear-gradient(135deg, var(--mut) 0 2px, transparent 2px 5px); opacity: 0.6; }
+.xray-drift-tag { font-size: 11px; font-weight: 600; color: var(--mut); white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  .xray-drift-cols { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .xray-drift-metrics { grid-template-columns: 1fr; }
+  /* The bar is the first thing to go when there is no room for six columns:
+     the numbers either side of it carry the same information exactly. The
+     numbers then take exactly what they need and the name absorbs the rest —
+     sized the other way round, "Consumer Cyclical" pushed "24.1% →" into
+     wrapping onto two lines mid-row. */
+  /* Four columns for four items. The track and the tag are display:none
+     here, which takes them out of the grid entirely rather than collapsing
+     them — so a fifth zero-width column was not an empty gap, it was where
+     the "then" weight got placed, overflowing on top of the "now" weight
+     beside it. Every row read as two numbers printed over each other. */
+  .xray-drift-row { grid-template-columns: minmax(0, 1fr) max-content max-content max-content; gap: 8px; }
+  .xray-drift-row .xray-bar-track, .xray-drift-tag { display: none; }
+  .xray-drift-row .xray-bar-sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 
 @media (max-width: 720px) {
   .xray-grid { grid-template-columns: 1fr; }
@@ -1287,6 +1614,29 @@ a:hover { text-decoration: underline; }
   font-weight: 500;
   color: var(--mut);
 }
+.footer-note .footer-links { display: flex; gap: 16px; flex-wrap: wrap; }
+/* What a deterministic import deliberately did not read. Styled as a notice
+   rather than an error: a named hole is the feature, not a failure. */
+.smart-import-skipped {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-left: 3px solid var(--gold, #d7a641);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--sec);
+  text-align: left;
+}
+.smart-import-skipped ul { margin: 6px 0; padding-left: 18px; }
+.smart-import-skipped li { margin-bottom: 3px; }
+.smart-import-skipped code {
+  background: var(--bg); border-radius: 4px; padding: 0 4px; font-size: 12px;
+}
+.footer-note a { color: var(--mut); text-decoration: none; }
+.footer-note a:hover { color: var(--acc); text-decoration: underline; }
+/* The wordmark on the lock card is a link now; keep it looking like a title. */
+.lock-card .lock-home { text-decoration: none; }
+.lock-card .lock-home:hover span { color: var(--acc); }
 
 .osschip.plan-chip {
   background: var(--acc-soft);
@@ -1893,6 +2243,83 @@ a:hover { text-decoration: underline; }
   line-height: 1.4;
 }
 
+.smart-import-table tbody .smart-tax-lot-row > td {
+  padding: 0 10px 12px;
+  background: #f5f8ff;
+}
+.smart-tax-lots {
+  position: sticky;
+  left: 10px;
+  width: min(720px, calc(100vw - 88px));
+  box-sizing: border-box;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 12px;
+}
+.smart-tax-lots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.smart-tax-lots-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.smart-tax-lots-head strong { color: var(--ink); font-size: 13px; }
+.smart-tax-lots-head span { color: var(--mut); font-size: 11.5px; line-height: 1.4; }
+.smart-tax-lot-list { display: flex; flex-direction: column; gap: 8px; }
+.smart-tax-lot {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.15fr) minmax(100px, .8fr) minmax(140px, 1fr) 30px;
+  gap: 8px;
+  align-items: end;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--inset);
+}
+.modal .smart-tax-lot label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+}
+.modal .smart-tax-lot label span {
+  color: var(--mut);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.modal .smart-tax-lot input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--bd);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 7px 8px;
+  font: 13px var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.modal .smart-tax-lot input:focus { border-color: var(--acc); outline: none; }
+.smart-tax-lot-remove {
+  width: 30px;
+  height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--mut);
+  font-size: 19px;
+  cursor: pointer;
+}
+.smart-tax-lot-remove:hover { color: var(--down); background: rgba(224, 69, 58, .1); }
+
 .smart-import-replace {
   display: flex;
   align-items: center;
@@ -1900,6 +2327,21 @@ a:hover { text-decoration: underline; }
   font-size: 13px;
   color: var(--sec);
   font-weight: 500;
+}
+
+@media (max-width: 620px) {
+  .modal-backdrop:has(.smart-import-modal) { padding: 8px; }
+  .modal.smart-import-modal { width: 100%; max-width: 100%; max-height: 94vh; }
+  .smart-import-head { padding: 16px 18px 12px; }
+  .smart-import-intake,
+  .smart-import-review { padding: 16px 18px 20px; }
+  .smart-tax-lots { width: calc(100vw - 68px); }
+  .smart-tax-lots-head { align-items: flex-start; }
+  .smart-tax-lot {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
+  }
+  .modal .smart-tax-lot label:first-child { grid-column: 1 / 3; }
+  .modal .smart-tax-lot input { min-height: 42px; font-size: 16px; }
 }
 
 /* ---------- Modal + dialogs ---------- */
@@ -1979,21 +2421,83 @@ a:hover { text-decoration: underline; }
 
 /* ---------- Tax-lots drawer ---------- */
 .drawer-backdrop {
-  position: fixed; inset: 0;
+  position: fixed;
+  inset: 0;
   background: rgba(20, 24, 34, 0.45);
-  display: flex; justify-content: flex-end;
-  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+  z-index: 200;
 }
 .drawer {
+  position: relative;
   background: var(--card);
-  width: 100%; max-width: 460px;
+  width: min(560px, 100%);
+  max-width: none;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 28px;
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.15);
 }
 .drawer h2 { font-size: 18px; font-weight: 800; margin: 0 0 8px; letter-spacing: -0.01em; }
 .drawer-sub { font-size: 13px; color: var(--mut); margin-bottom: 20px; font-weight: 500; }
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--bd);
+}
+.drawer-head > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.drawer-head h2 { flex-basis: 100%; margin: 0; }
+.tax-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+}
+.tax-summary > div {
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--inset);
+}
+.tax-summary span { display: block; margin-bottom: 5px; color: var(--mut); font-size: 11px; font-weight: 700; }
+.tax-summary strong { display: block; overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.tax-lot-table { overflow-x: auto; margin: 0 -4px; padding: 0 4px 8px; }
+.tax-lot-table table { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 12px; }
+.tax-lot-table th,
+.tax-lot-table td { padding: 10px 8px; text-align: right; border-bottom: 1px solid var(--bd); }
+.tax-lot-table th { color: var(--mut); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; }
+.tax-lot-table .empty-cell { padding: 28px 16px; color: var(--mut); text-align: center; line-height: 1.5; }
+.tax-badge { display: inline-flex; padding: 4px 8px; border-radius: 999px; background: var(--down-soft); color: var(--down); white-space: nowrap; font-size: 10px; font-weight: 700; }
+.tax-badge.long { background: var(--up-soft); color: var(--up); }
+.tax-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(150px, 1fr);
+  gap: 12px;
+  align-items: end;
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--bd);
+}
+.tax-form h3 { grid-column: 1 / -1; margin: 0; font: 400 24px/1 var(--font-display); }
+.tax-form .btn { min-height: 40px; grid-column: 1 / -1; }
+
+@media (max-width: 620px) {
+  .drawer { width: 100%; padding: 18px 16px max(24px, env(safe-area-inset-bottom)); }
+  .tax-summary { grid-template-columns: 1fr 1fr; }
+  .tax-summary > div:last-child { grid-column: 1 / -1; }
+  .tax-form { grid-template-columns: 1fr; }
+  .tax-form h3,
+  .tax-form .btn { grid-column: auto; }
+  .drawer .tax-form input { min-height: 46px; font-size: 16px; }
+  .tax-form .btn { min-height: 48px; touch-action: manipulation; }
+}
 
 /* ---------- Empty states ---------- */
 .empty-box {
@@ -2431,11 +2935,14 @@ a:hover { text-decoration: underline; }
   font-variant-numeric: tabular-nums;
 }
 
-/* Symbol cell */
+/* Symbol cell.
+   Not a flex container: this class lands on a <td>, and `display: flex` takes
+   the cell out of table layout, so its height and border-bottom stop lining up
+   with the rest of its row. The result is a staircase down the symbol column
+   that looks like a rendering fault. The children stack on their own — strong
+   is block-level, small is a block beneath it — which is all the flex column
+   was doing. */
 .sym-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
   min-width: 0;
   white-space: normal;
 }
@@ -2444,11 +2951,14 @@ a:hover { text-decoration: underline; }
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--ink);
-  display: inline-flex;
+  /* Block-level flex so it occupies its own line, as the column layout did. */
+  display: flex;
   align-items: center;
   gap: 6px;
 }
 .sym-cell small {
+  display: block;      /* needs a block box for the ellipsis to apply */
+  margin-top: 2px;     /* replaces the removed flex `gap` */
   font-size: 12px;
   color: var(--mut);
   font-weight: 500;
@@ -2982,7 +3492,37 @@ a:hover { text-decoration: underline; }
   color: var(--ink);
   flex-wrap: wrap;
 }
-.schedule-fields { padding-bottom: 14px; }
+.schedule-fields { padding-bottom: 0; }
+
+/* The master switch owns the card; its settings are indented beneath it so
+   the hierarchy is visible rather than implied by a disabled state. */
+.schedule-master { align-items: flex-start; padding: 4px 24px 0; }
+.schedule-master .switch-track { margin-top: 2px; flex: 0 0 auto; }
+.schedule-master-text { display: flex; flex-direction: column; gap: 2px; }
+.schedule-master-text b { font-size: 14px; font-weight: 700; color: var(--ink); }
+.schedule-master-text em {
+  font-style: normal;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--mut);
+}
+.schedule-detail {
+  margin: 10px 24px 4px;
+  padding: 4px 0 12px 16px;
+  border-left: 2px solid var(--bd);
+}
+.schedule-detail .schedule-fields { padding-left: 0; padding-right: 0; }
+.schedule-email { padding: 10px 0 0; }
+.schedule-email .switch-label { font-weight: 600; }
+.schedule-email .switch-label b { color: var(--ink); font-weight: 700; }
+.schedule-email-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--mut);
+  line-height: 1.5;
+}
+.panel-note.is-saved { color: var(--up); }
+
 .schedule-toggle label, .schedule-fields label {
   display: inline-flex;
   align-items: center;
@@ -3281,6 +3821,25 @@ a:hover { text-decoration: underline; }
 
 /* News compatibility — older class names */
 .news-view, .news-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+
+/* Two columns need two columns' worth of room. Below this the grid gave each
+   panel half a phone — about four words a line — so a headline ran to five
+   lines and its summary to ten, side by side with another doing the same.
+   Stacked, each story gets the full width and "Your Holdings" comes first,
+   which is the panel someone opened this tab for. */
+@media (max-width: 900px) {
+  .news-view, .news-grid { grid-template-columns: 1fr; }
+  /* The note sits under the heading rather than beside it: at this width
+     "headlines naming your holdings" was wrapping to four lines in a column
+     narrower than the words themselves. */
+  .news-grid .panel-header {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  .news-grid .panel-note { text-align: left; }
+}
 .news-column { display: flex; flex-direction: column; }
 .news-item {
   display: block;
@@ -3421,4 +3980,800 @@ a:hover { text-decoration: underline; }
   .positions-header, .position-row, .thr, .trow { grid-template-columns: 1fr; height: auto; padding: 14px 18px; gap: 6px; }
   .positions-header { display: none; }
   .v, .num-cell { text-align: left; }
+}
+
+/* Final cascade for the Jade shell. Kept last deliberately: the component
+   stylesheet above contains legacy selectors retained for compatibility. */
+.app-shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); background: var(--bg); }
+.app-sidebar { position: sticky; top: 0; height: 100vh; padding: 30px 24px 24px; background: var(--acc); color: #fffaf1; display: flex; flex-direction: column; z-index: 20; }
+.app-container.app-main { max-width: none; min-width: 0; width: 100%; margin: 0; padding: 30px 40px 54px; }
+.page-header { min-height: 66px; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.page-heading h2 { margin: 0; font: 400 clamp(38px, 4vw, 48px)/.96 var(--font-display); letter-spacing: -.025em; }
+.page-heading p { margin: 8px 0 0; color: var(--sec); font-size: 13.5px; }
+.stats-grid { grid-template-columns: 1.55fr .95fr .95fr .95fr; gap: 16px; }
+.stat-card { position: relative; min-height: 154px; padding: 22px 24px; overflow: hidden; background: var(--card); border-color: var(--bd); box-shadow: var(--shadow-card); }
+.stat-label { color: var(--sec); font-weight: 520; margin-bottom: 13px; }
+.stat-value { font-size: clamp(27px, 2.3vw, 37px); font-weight: 680; letter-spacing: -.035em; }
+.stat-sub { margin-top: 9px; font-size: 14px; }
+.stat-meta { margin-top: 4px; color: var(--sec); font-size: 12.5px; }
+.overview-grid { grid-template-columns: minmax(0, 1.65fr) minmax(300px, .85fr); gap: 18px; }
+.panel, .card, .performance-card, .stock-card { background: var(--card); border-color: var(--bd); box-shadow: var(--shadow-card); }
+.stock-explorer, .performance-panel { background: transparent; border: 0; box-shadow: none; }
+.stock-explorer { padding: 0; }
+.stock-card { border-radius: 15px; }
+.stock-card:hover { border-color: var(--acc); transform: translateY(-1px); box-shadow: 0 8px 24px rgba(1,77,67,.07); }
+.briefing-hero { background: var(--card); border: 1px solid var(--bd); border-radius: var(--r-card); padding: 18px 20px; margin-bottom: 16px; }
+.briefing-hero h2 { display: none; }
+.briefing-hero p { max-width: 680px; color: var(--sec); font-size: 13px; margin-top: 0; }
+.briefing-cover { position: relative; background: transparent; }
+.briefing-cover h1 { font-family: var(--font-display); font-weight: 400; letter-spacing: -.025em; }
+.briefing-bird { position: absolute; right: 25px; top: 18px; width: 52px; height: 46px; color: var(--ink); opacity: .85; }
+.btn-primary:hover:not(:disabled) { background: #014d43; border-color: #014d43; }
+.segmented button.active { background: var(--acc); color: #fff; box-shadow: none; }
+
+@media (max-width: 1120px) {
+  .app-shell { grid-template-columns: 212px minmax(0, 1fr); }
+  .app-sidebar { padding-left: 18px; padding-right: 18px; }
+  .app-container.app-main { padding-left: 25px; padding-right: 25px; }
+  .stats-grid { grid-template-columns: 1fr 1fr; }
+  .overview-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .app-shell { display: block; }
+  .app-sidebar { position: relative; height: auto; padding: 16px; }
+  .app-sidebar > div:first-child { display: flex; align-items: center; justify-content: space-between; }
+  .sidebar-brand { font-size: 29px; }
+  .instance-chip { margin-top: 0; }
+  .sidebar-nav { display: flex; overflow-x: auto; margin-top: 15px; gap: 5px; padding-bottom: 2px; }
+  .sidebar-nav button { width: auto; flex: none; padding: 9px 12px; font-size: 13px; }
+  .sidebar-nav-icon { width: 18px; height: 18px; }
+  .sidebar-count, .sidebar-foot { display: none; }
+  .app-container.app-main { padding: 22px 16px 42px; }
+  .page-header { display: block; }
+  .header-actions { margin-top: 18px; margin-left: 0; }
+  .stats-grid { grid-template-columns: 1fr; }
+  .stat-card { min-height: 132px; }
+}
+
+/* --- performance coverage ------------------------------------------------
+   The brief's rule: never imply precision the data does not support. A
+   portfolio reconstructed from a holdings snapshot and one reconstructed
+   from a full ledger must not look alike. */
+.coverage-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--inset);
+  font-size: 13px;
+}
+.coverage-badge {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, rgba(46, 184, 135, 0.16));
+  color: var(--accent);
+}
+.coverage-note.coverage-holdings_only .coverage-badge,
+.coverage-note.coverage-missing_cash_activity .coverage-badge,
+.coverage-note.coverage-partial .coverage-badge {
+  background: rgba(214, 158, 46, 0.18);
+  color: #8a6416;
+}
+.coverage-since { font-weight: 600; }
+.coverage-message { color: var(--muted); flex: 1 1 100%; line-height: 1.45; }
+
+/* --- brokerages ----------------------------------------------------------
+   Its own surface rather than a card inside Connectors: Connectors is the
+   server's configuration, which a hosted customer does not own, while their
+   brokerage connection is the most personal thing in the product. */
+/* .panel has no horizontal padding of its own — .panel-header supplies 24px
+   and every sibling has to match it, or the body text hangs off the card. */
+.brokerages > :not(.panel-header) { padding-left: 24px; padding-right: 24px; }
+.brokerage-empty { margin: 4px 0 18px; }
+.brokerage-notice {
+  margin: 0 24px 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.brokerage-list { list-style: none; margin: 18px 0 0; padding: 0; }
+.brokerage-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+}
+.brokerage-row:last-child { border-bottom: none; }
+.brokerage-name { font-weight: 600; }
+.brokerage-meta { font-size: 12px; margin-top: 2px; }
+.brokerage-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.brokerage-foot { font-size: 12px; margin-top: 16px; line-height: 1.5; }
+
+/* --- smart import: transactions -----------------------------------------
+   A statement of what happened, reviewed alongside what is held. Activity
+   statements have no positions at all, so this section stands on its own. */
+.smart-txn-review { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); }
+.smart-txn-review h3 { margin: 0 0 6px; font-size: 15px; }
+.smart-txn-blurb { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin: 0 0 14px; max-width: 62ch; }
+.smart-import-table tr.row-muted { opacity: 0.45; }
+
+/* --- Transactions -------------------------------------------------------- */
+/* .panel supplies no horizontal padding — children bring their own, which is
+   what .panel-header does. Same trap the Brokerages card fell into. */
+.transactions > :not(.panel-header):not(.table-scroll) {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.txn-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sec);
+  white-space: nowrap;
+}
+.txn-count b { font-weight: 800; color: var(--ink); }
+.txn-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 14px;
+  padding-bottom: 16px;
+}
+.txn-filters label { display: flex; flex-direction: column; gap: 5px; }
+.txn-filters label span {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+.txn-filters select,
+.txn-filters input {
+  font-family: var(--font);
+  font-size: 13.5px;
+  padding: 7px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+  min-width: 120px;
+}
+.txn-filters select:focus,
+.txn-filters input:focus { border-color: var(--acc); outline: none; }
+.txn-clear { align-self: flex-end; font-size: 12.5px; }
+.txn-error {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--down) 12%, transparent);
+  color: var(--down);
+  font-size: 13px;
+  font-weight: 600;
+}
+.txn-table th.num, .txn-table td.num { text-align: right; }
+.txn-table .txn-date { white-space: nowrap; color: var(--sec); }
+.txn-table .txn-source { color: var(--mut); font-size: 12.5px; white-space: nowrap; }
+.txn-action {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: capitalize;
+  border: 1px solid transparent;
+}
+.txn-buy { background: color-mix(in srgb, var(--up) 14%, transparent); color: var(--up); }
+.txn-sell { background: color-mix(in srgb, var(--down) 14%, transparent); color: var(--down); }
+.txn-in { background: color-mix(in srgb, var(--acc) 13%, transparent); color: var(--acc); }
+.txn-out { background: color-mix(in srgb, var(--mut) 16%, transparent); color: var(--sec); }
+.txn-neutral { background: var(--bg); color: var(--sec); border-color: var(--bd); }
+.txn-cash-row { color: var(--mut); font-style: italic; }
+.txn-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--bd);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--mut);
+  text-transform: uppercase;
+}
+.txn-row-actions { text-align: right; white-space: nowrap; }
+.btn-tiny {
+  padding: 4px 9px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+.btn-ghost.danger:hover { color: var(--down); border-color: var(--down); }
+.txn-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 14px;
+  padding-bottom: 16px;
+  font-size: 12.5px;
+  color: var(--mut);
+  font-weight: 500;
+}
+.modal.txn-edit-modal { max-width: 620px; }
+.txn-edit-hint { font-size: 12.5px; color: var(--sec); margin: -8px 0 16px; }
+.txn-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px 14px;
+}
+.txn-edit-grid .field span { font-size: 12px; font-weight: 600; color: var(--sec); }
+.txn-edit-grid input,
+.txn-edit-grid select {
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--bd);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+  width: 100%;
+}
+.txn-edit-grid input:disabled { background: var(--bg); color: var(--mut); }
+.txn-edit-grid input:focus,
+.txn-edit-grid select:focus { border-color: var(--acc); outline: none; }
+.txn-edit-notes { grid-column: 1 / -1; }
+.txn-confirm-line { font-size: 14.5px; color: var(--ink); margin: 0 0 10px; }
+.txn-confirm-note { font-size: 12.5px; color: var(--sec); margin: 0 0 18px; line-height: 1.5; }
+
+@media (max-width: 720px) {
+  .txn-edit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .txn-filters select, .txn-filters input { min-width: 0; flex: 1; }
+  .txn-pager { flex-wrap: wrap; justify-content: center; }
+}
+
+/* A holding whose price history is shorter than the chart's window. */
+.chart-note { color: var(--mut); font-weight: 500; cursor: help; }
+
+/* When the X-ray last recomputed — the only visible proof it ran, since the
+   numbers usually come back the same. */
+.xray-ran-at { font-size: 12px; color: var(--mut); margin-right: 10px; }
+
+/* --- Realized results ----------------------------------------------------- */
+.realized { padding-bottom: 18px; border-bottom: 1px solid var(--bd); margin-bottom: 18px; }
+.realized-head { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.realized-head h3 { font-size: 15px; font-weight: 800; margin: 0 0 3px; letter-spacing: -0.01em; }
+.realized-sub { font-size: 12.5px; color: var(--sec); margin: 0 0 14px; max-width: 62ch; line-height: 1.5; }
+.realized-year { margin-left: auto; display: flex; flex-direction: column; gap: 5px; }
+.realized-year span {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--mut);
+}
+.realized-year select {
+  font-family: var(--font); font-size: 13.5px; padding: 7px 10px;
+  border: 1px solid var(--bd); border-radius: 9px; background: var(--card); color: var(--ink);
+}
+.realized-figures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-bottom: 14px;
+}
+.realized-fig {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 12px 14px; border: 1px solid var(--bd); border-radius: 11px; background: var(--card);
+}
+.realized-label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mut); }
+.realized-fig b { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.realized-note { font-size: 11.5px; color: var(--mut); }
+/* Deliberately not a figure card: it is a hole in the record, not a result. */
+.realized-gap {
+  padding: 12px 14px; border-radius: 11px; margin-bottom: 14px;
+  background: color-mix(in srgb, var(--mut) 10%, transparent);
+  border: 1px dashed var(--bd);
+  font-size: 12.5px; color: var(--sec); line-height: 1.55;
+}
+.realized-gap b { color: var(--ink); font-weight: 800; }
+.realized-gap em { font-style: normal; font-weight: 700; color: var(--ink); }
+.realized-toggle { margin-bottom: 4px; }
+.realized-table { margin-top: 6px; }
+.realized-gap-cell { color: var(--sec); }
+.realized-basis { font-size: 11.5px; color: var(--mut); margin: 10px 0 0; line-height: 1.5; }
+
+/* Which question the trend line answered — value actually held, or today's
+   basket priced backwards. */
+.readout-basis {
+  display: block;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mut);
+  letter-spacing: 0.02em;
+}
+
+/* --- What is missing, and what fixes it ----------------------------------- */
+.gaps {
+  border: 1px solid var(--bd); border-radius: var(--r-card); background: var(--card);
+  padding: 16px 20px; margin-bottom: 16px;
+}
+.gaps-head { display: flex; align-items: baseline; gap: 14px; }
+.gaps-head h3 { font-size: 14.5px; font-weight: 800; margin: 0 0 3px; letter-spacing: -0.01em; }
+.gaps-head > button { margin-left: auto; flex-shrink: 0; }
+.gaps-hub-link {
+  margin-left: auto; flex-shrink: 0; background: none; border: 0; padding: 0;
+  font: inherit; font-size: 12px; color: var(--sec); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.gaps-hub-link:hover { color: var(--acc); }
+.gaps-sub { font-size: 12.5px; color: var(--sec); margin: 0 0 12px; line-height: 1.55; max-width: 74ch; }
+.gaps-sub b { color: var(--ink); font-weight: 800; }
+.gaps-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+/* A grid, not a wrapping flex row.
+   The old row let the action keep its natural width and gave the prose
+   whatever was left, so on a phone the sentence became a column four words
+   wide and eight lines tall beside a mostly empty card. Columns here are
+   "text takes the rest", "action at its own width", "close button" — and
+   below 720px the action drops onto its own line at full width instead of
+   strangling the text. */
+.gap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--bd); border-radius: 10px; background: var(--bg);
+}
+.gap-close {
+  grid-column: 3;
+  align-self: start;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--sec); font-size: 17px; line-height: 1; cursor: pointer;
+  flex-shrink: 0;
+}
+.gap-close:hover:not(:disabled) { background: var(--inset); color: var(--ink); }
+.gap-close:disabled { opacity: .4; cursor: default; }
+
+@media (max-width: 720px) {
+  .gap {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .gap-body { grid-column: 1; }
+  .gap-close { grid-column: 2; grid-row: 1; }
+  /* Full width on its own line: a phone has room for the button or for the
+     sentence, and squeezing both onto one line costs the sentence more. */
+  .gap-action, .gap-nothing {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+    text-align: center;
+  }
+}
+.gap-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.gap-body b { font-size: 13px; font-weight: 700; }
+.gap-body span { font-size: 12.5px; color: var(--sec); line-height: 1.5; }
+.gap-action { flex-shrink: 0; }
+.gap-note { border-style: dashed; }
+.gap-nothing { font-size: 12px; color: var(--mut); font-weight: 600; cursor: help; flex-shrink: 0; }
+
+/* The reconciliation line under the chart's return: value change and the
+   transfers that explain the gap between the two. Deliberately quiet — it
+   exists to stop a positive return over a falling line reading as a bug. */
+.readout-flow {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- drill-in on a realized figure ------------------------------------- */
+
+/* The figures became buttons. They must not start looking like buttons —
+   the panel reads as four numbers, and four chunky controls would drown the
+   numbers they exist to explain. */
+button.realized-fig {
+  font: inherit;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+button.realized-fig:hover,
+button.realized-fig:focus-visible {
+  border-color: var(--accent);
+  background: var(--card-hover, var(--card));
+}
+
+.drill-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 20, .45);
+}
+
+.drill {
+  width: min(900px, 100%);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .22);
+  padding: 20px 22px;
+}
+
+.drill-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.drill-head h3 { margin: 0 0 2px; }
+.drill-sub { margin: 0; color: var(--muted); font-size: 13px; }
+
+.drill-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 14px 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.drill-total b { font-size: 20px; font-variant-numeric: tabular-nums; }
+
+/* The table scrolls, not the page: the total above it has to stay visible
+   while you read the rows that make it up. */
+.drill-scroll { overflow: auto; flex: 1; min-height: 0; }
+.drill-table { width: 100%; font-size: 13px; }
+.drill-table td, .drill-table th { white-space: nowrap; }
+.drill-what { text-transform: capitalize; }
+.drill-broker {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: none;
+}
+.drill-empty { color: var(--muted); padding: 24px 0; text-align: center; }
+.drill-foot { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+/* One uncovered-history line per account, inside the realized gap notice. */
+.realized-gap-list { margin: 8px 0 8px; padding-left: 18px; }
+.realized-gap-list li { margin: 3px 0; }
+
+/* Events / By symbol inside the drill-in. Sits between the total and the
+   table so the figure stays put while the shape of the answer changes.
+
+   flex: 0 0 auto is load-bearing. .drill is a flex column at max-height, so a
+   long table shrank this strip from 40px to 12px and .segmented's
+   overflow:hidden clipped the buttons out of sight — a control that was
+   present, focusable and invisible. align-self stops it stretching the full
+   width of the dialog. */
+.drill-tabs {
+  margin: 0 0 10px;
+  flex: 0 0 auto;
+  align-self: flex-start;
+}
+.drill-tabs button { padding: 5px 14px; font-size: 13px; }
+
+/* On a phone the drill-in table is wider than the screen and scrolls
+   sideways — which loses the one column that says what you are looking at.
+   Pinning it keeps the symbol (or date) visible while the money scrolls. */
+.drill-table th:first-child,
+.drill-table td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--card);
+  z-index: 1;
+}
+.drill-table thead th:first-child { z-index: 2; }
+
+/* Record-what-these-cost form. Wider than the edit modal because it is a
+   table of lots, and the price column has to sit beside the shares it prices. */
+.cost-basis-modal { max-width: 720px; width: 100%; display: flex; flex-direction: column; }
+.cost-input {
+  width: 110px;
+  padding: 5px 8px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cost-running { margin-right: auto; font-size: 12px; color: var(--sec); }
+.modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+
+/* --- Actions hub -------------------------------------------------------
+   Where a put-aside reminder goes. Dismissing used to mean losing: the panel
+   hid and the work stayed undone with nowhere to find it again. */
+.hub { max-width: 900px; }
+.hub-head { display: flex; align-items: flex-end; gap: 20px; margin-bottom: 18px; }
+.hub-head h2 { margin: 0 0 4px; }
+.hub-sub { font-size: 12.5px; color: var(--sec); margin: 0; line-height: 1.6; max-width: 62ch; }
+.hub-figure { margin-left: auto; text-align: right; flex-shrink: 0; }
+.hub-figure b { display: block; font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
+.hub-figure span { font-size: 11.5px; color: var(--sec); }
+.hub-group { margin-bottom: 24px; }
+.hub-group h3 {
+  font-size: 12px; font-weight: 800; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--sec); margin: 0 0 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.hub-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 19px; padding: 0 6px;
+  background: var(--inset); border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0; color: var(--ink);
+}
+.hub-empty { font-size: 12.5px; color: var(--sec); margin: 0; }
+/* Put aside, not gone: legible, but visibly not asking for attention. */
+.gap-aside { opacity: .72; }
+.gap-aside:hover { opacity: 1; }
+.hub-clear { text-align: center; padding: 48px 20px; }
+.hub-clear h3 { margin: 0 0 6px; font-size: 16px; }
+.hub-clear p { margin: 0 auto; max-width: 46ch; color: var(--sec); font-size: 13px; line-height: 1.6; }
+
+/* --- Connected accounts -------------------------------------------------
+   The connections list says which institutions are linked; this says which
+   accounts they brought. Three rows used to stand for six real accounts. */
+.accounts { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--bd); }
+.accounts-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+.accounts-head h3 { margin: 0; font-size: 13px; font-weight: 800; letter-spacing: -0.01em; }
+.accounts-total { margin-left: auto; font-size: 12px; color: var(--sec); font-variant-numeric: tabular-nums; }
+.accounts-group { margin-bottom: 16px; }
+.accounts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.account-row {
+  width: 100%;
+  display: flex; align-items: center; gap: 14px;
+  padding: 11px 14px; text-align: left;
+  border: 1px solid var(--bd); border-radius: 10px; background: var(--bg);
+  font: inherit; color: inherit; cursor: pointer;
+}
+.account-row:hover { border-color: var(--acc); }
+.account-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.account-id b { font-size: 13px; font-weight: 700; }
+.account-value { display: flex; flex-direction: column; gap: 2px; text-align: right; flex-shrink: 0; }
+.account-value b { font-size: 14px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.account-sub { font-size: 11.5px; color: var(--sec); }
+
+.account-drill { max-width: 460px; }
+.account-value-big { display: flex; align-items: baseline; gap: 7px; margin: 4px 0 18px; }
+.account-value-big b { font-size: 27px; font-weight: 800; letter-spacing: -0.025em; }
+.account-value-big span { font-size: 12px; color: var(--sec); }
+.account-facts {
+  display: grid; grid-template-columns: auto 1fr;
+  gap: 7px 20px; margin: 0 0 4px; font-size: 13px;
+}
+.account-facts dt { color: var(--sec); }
+.account-facts dd { margin: 0; text-align: right; font-weight: 600; }
+.account-section {
+  margin: 18px 0 9px; font-size: 11px; font-weight: 800; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--sec);
+}
+
+@media (max-width: 720px) {
+  .account-row { align-items: flex-start; }
+  .accounts-head { flex-wrap: wrap; }
+}
+
+/* --- Compact header ----------------------------------------------------
+   Four full-width buttons rode every tab and turned the first two inches of
+   every page into a toolbar. What stays at full size is the thing that is
+   always urgent and the thing that is always wanted; the rest is behind a
+   menu or reduced to its icon. */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; flex-shrink: 0;
+  border: 1px solid var(--bd); border-radius: var(--r-btn);
+  background: var(--card); color: var(--ink); cursor: pointer; padding: 0;
+}
+.icon-btn:hover:not(:disabled) { border-color: var(--acc); color: var(--acc); }
+.icon-btn:disabled { opacity: .45; cursor: default; }
+.icon-btn svg { width: 17px; height: 17px; }
+
+.bell { position: relative; }
+/* Unread-style, so a glance at the header answers "is anything waiting?" */
+.bell.has-alerts { color: var(--acc); border-color: var(--acc); }
+.bell-count {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 17px; height: 17px; padding: 0 4px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--acc); color: #fff;
+  border-radius: 999px; font-size: 10.5px; font-weight: 800; line-height: 1;
+}
+
+.header-menu { position: relative; }
+.header-menu-pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+  min-width: 208px; padding: 6px;
+  background: var(--card); border: 1px solid var(--bd);
+  border-radius: 12px; box-shadow: 0 12px 32px rgba(1, 77, 67, .12);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.header-menu-pop button {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border: 0; border-radius: 8px;
+  background: none; font: inherit; font-size: 13px; color: var(--ink);
+  text-align: left; cursor: pointer; width: 100%;
+}
+.header-menu-pop button:hover { background: var(--inset); }
+.header-menu-pop svg { width: 15px; height: 15px; flex-shrink: 0; }
+.header-menu-currency {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; margin-top: 3px; border-top: 1px solid var(--bd);
+  font-size: 13px; color: var(--sec);
+}
+.header-menu-currency select {
+  font: inherit; font-size: 13px; font-weight: 600;
+  padding: 3px 6px; border: 1px solid var(--bd); border-radius: 7px;
+  background: var(--bg); color: var(--ink);
+}
+
+/* Institution and its Disconnect on one line, with its accounts beneath —
+   they used to be separate rows in separate sections, so every broker cost
+   two rows to say one thing. */
+.accounts-group-head {
+  display: flex; align-items: center; gap: 12px; margin: 0 0 8px;
+}
+.accounts-group-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.accounts-group-id b { font-size: 14px; font-weight: 800; }
+.accounts-group-head > button { margin-left: auto; flex-shrink: 0; }
+
+@media (max-width: 620px) {
+  /* On a phone the label is the first thing worth losing: a plus in a green
+     pill is unambiguous, and the row then fits without wrapping. */
+  .btn-primary .btn-label { display: none; }
+}
+
+/* The popup anchors to whichever side its button sits on. Header actions are
+   right-aligned on a wide screen and left-aligned once the header stacks, so
+   a fixed `right: 0` sent the menu off the left edge of a phone — half the
+   labels were cut off before the first letter. */
+@media (max-width: 760px) {
+  .header-menu-pop { left: 0; right: auto; }
+}
+.header-menu-pop { max-width: calc(100vw - 32px); }
+
+/* What the reader came here to upload, when Smart Import was opened from a
+   gap card. Above the generic blurb, because it is the specific answer. */
+.smart-import-brief {
+  border: 1px solid var(--acc); border-radius: 11px;
+  background: var(--inset); padding: 13px 15px; margin-bottom: 14px;
+}
+.smart-import-brief b { display: block; font-size: 13.5px; margin-bottom: 4px; }
+.smart-import-brief p { margin: 0; font-size: 12.5px; color: var(--sec); line-height: 1.55; }
+.smart-import-brief ol { margin: 9px 0 0; padding-left: 19px; font-size: 12.5px; line-height: 1.7; }
+
+/* --- Agent access ------------------------------------------------------- */
+/* Token management + MCP setup. Lives in the Connectors tab. */
+
+.agent-access { margin-top: 20px; }
+
+.agent-token-form {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.agent-token-form .field { flex: 1 1 220px; margin: 0; }
+
+/* A token is shown once and never again, so the reveal is deliberately loud
+   and deliberately not dismissible by clicking elsewhere. */
+.agent-token-reveal {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--accent-amber);
+  border-radius: 10px;
+  background: var(--accent-amber-bg);
+}
+.agent-token-warning { margin: 0 0 8px; font-size: 13px; }
+.agent-token-value {
+  display: block;
+  overflow-x: auto;
+  padding: 10px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  background: var(--bg-inset);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.agent-token-list { list-style: none; margin: 14px 0 0; padding: 0; }
+.agent-token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.agent-token-row:first-child { border-top: 0; }
+
+.agent-setup { margin-top: 16px; }
+.agent-setup summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.agent-setup pre {
+  overflow-x: auto;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .agent-token-row { flex-direction: column; align-items: flex-start; }
+}
+
+/* --- Chat (pack-driven renderer) ---------------------------------------- */
+
+.chat-panel { display: flex; flex-direction: column; gap: 12px; }
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.chat-empty { margin: auto; max-width: 46ch; text-align: center; }
+
+.chat-message { max-width: 78%; padding: 10px 13px; border-radius: var(--r-card); font-size: 14px; }
+.chat-message p { margin: 0; }
+.chat-message-user {
+  align-self: flex-end;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+}
+.chat-message-assistant { align-self: flex-start; background: var(--bg-card); }
+
+.chat-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.chat-tool-chip {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.chat-thinking { align-self: flex-start; font-size: 13px; color: var(--text-muted); }
+.chat-error { color: var(--accent-red); }
+
+.chat-composer { display: flex; gap: 10px; align-items: flex-end; }
+.chat-composer textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-btn);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+}
+
+.chat-disclaimer { margin: 0; font-size: 12px; color: var(--text-muted); text-align: center; }
+
+@media (max-width: 560px) {
+  .chat-message { max-width: 92%; }
+  .chat-log { max-height: 55vh; }
 }

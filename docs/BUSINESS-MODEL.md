@@ -31,7 +31,7 @@ institutional-grade analysis.
 | Connectors | Yahoo, FMP (BYO key), CoinGecko, SnapTrade (BYO operator keys), CSV, **the whole connector SDK + external plugin loading** |
 | Intelligence (BYO keys) | AI briefings, Smart Import — you bring your Anthropic/DeepSeek key and pay the provider directly |
 | Analytics | Real TWR / MWR (Modified Dietz + XIRR), period returns, allocation |
-| Apps | Web UI, PWA, the entire Expo mobile app source |
+| Apps | Web UI, PWA — responsive, so a phone browser is a first-class client |
 | Ops | Docker, backup/restore, app lock, secrets-at-rest, migrations |
 
 Rationale: this is table stakes vs. Ghostfolio and the credibility engine for

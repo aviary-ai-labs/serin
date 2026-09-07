@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _AI_STATUS_CACHE: dict[str, object] = {"expires_at": 0.0, "status": None}
@@ -66,6 +66,10 @@ class Settings:
     # the strict, error-if-unconfigured behaviour back.
     market_data_provider: str = _env("MARKET_DATA_PROVIDER", "auto")
     fmp_api_key: str = os.environ.get("FMP_API_KEY", "")
+    # Shared secret for the price-relay ingest. Empty disables the endpoint
+    # entirely — an ingest that anyone can post to is a way to make every
+    # number on the dashboard wrong from the outside.
+    price_relay_token: str = os.environ.get("SERIN_PRICE_RELAY_TOKEN", "")
     fmp_base_url: str = os.environ.get("FMP_BASE_URL", "https://financialmodelingprep.com")
     ai_provider: str = _env("AI_PROVIDER", "auto")
     claude_code_oauth_token: str = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")

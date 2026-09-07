@@ -29,11 +29,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +69,28 @@ SYSTEM_PROMPT = (
     "      \"average_cost\": 145.20,         // per-share cost basis if visible, else 0\n"
     "      \"current_price\": 192.50,        // per-share current price if visible, else 0\n"
     "      \"broker\": \"schwab\",           // broker name (lowercase, underscore), default 'manual'\n"
-    "      \"asset_type\": \"stock\"         // stock | etf | crypto | cash | option, default 'stock'\n"
+    "      \"asset_type\": \"stock\",        // stock | etf | crypto | cash | option, default 'stock'\n"
+    "      \"tax_lots\": [                   // only when dated lot rows are visible\n"
+    "        {\n"
+    "          \"quantity\": 25,              // shares in this lot\n"
+    "          \"cost_basis\": 140.10,        // per-share price paid, not total cost\n"
+    "          \"acquired_at\": \"2025-12-18\" // purchase date, YYYY-MM-DD\n"
+    "        }\n"
+    "      ]\n"
+    "    }\n"
+    "  ],\n"
+    "  \"transactions\": [\n"
+    "    {\n"
+    "      \"action\": \"sell\",            // buy | sell | dividend | interest | fee | tax |\n"
+    "                                       //   deposit | withdrawal | transfer\n"
+    "      \"symbol\": \"NFLX\",            // ticker for buy/sell/dividend; \"\" for cash rows\n"
+    "      \"quantity\": 50,                 // shares for buy/sell; 0 otherwise\n"
+    "      \"price\": 612.40,                // per-share price for buy/sell; the CASH AMOUNT\n"
+    "                                       //   for dividend/fee/tax/deposit/withdrawal\n"
+    "      \"fee\": 0,                       // commission or charge on this row\n"
+    "      \"occurred_at\": \"2026-02-11\",  // trade/settlement date, YYYY-MM-DD, required\n"
+    "      \"broker\": \"schwab\",\n"
+    "      \"external_id\": \"\"             // broker's own reference for this row, if shown\n"
     "    }\n"
     "  ],\n"
     "  \"notes\": \"\"                       // optional one-line summary or caveat\n"
@@ -76,9 +99,35 @@ SYSTEM_PROMPT = (
     "- Output JSON only. No markdown fences, no prose, no commentary.\n"
     "- If a value is genuinely unknown, use 0 for numbers and \"\" for strings.\n"
     "- Never invent symbols, quantities, or prices. Skip rows you cannot read.\n"
+    "- TAX LOT VIEWS: return exactly ONE aggregate position per symbol and broker. "
+    "Use the summary row for the position quantity, average cost, and current price. "
+    "Put each dated subrow under that position's tax_lots array; never return each "
+    "lot as a separate position.\n"
+    "- For tax lots, acquired_at is the acquisition/purchase date normalized to "
+    "YYYY-MM-DD, quantity is that lot's shares, and cost_basis is the per-share "
+    "Price Paid. Never invent a date or infer a lot from an undated row.\n"
     "- Cash balances: use symbol=\"CASH\", asset_type=\"cash\", quantity=<amount>, average_cost=1, current_price=1.\n"
     "- Crypto: use symbols like BTC, ETH (not BTC-USD). Asset_type=\"crypto\".\n"
+    "- ACTIVITY / TRADE HISTORY / REALIZED GAIN statements: fill the transactions "
+    "array. This is the only evidence that can establish a CLOSED position — a "
+    "current holdings or tax-lot screen shows only what is still owned, so never "
+    "infer a sale from one.\n"
+    "- Cash movements matter as much as trades. Deposits, withdrawals, transfers, "
+    "dividends, interest, fees and taxes all belong in transactions. Without them "
+    "money added to the account is indistinguishable from money earned.\n"
+    "- Classify carefully: a DEPOSIT is money arriving from outside; a TRANSFER "
+    "moves money between two of this person's own accounts. Do not guess — if a "
+    "row is ambiguous, still return it and describe the doubt in notes.\n"
+    "- For non-share rows (dividend, fee, tax, deposit, withdrawal) put the cash "
+    "amount in price and leave quantity 0.\n"
+    "- external_id: copy the broker's own transaction reference when one is "
+    "visible. It is what stops a re-imported statement from duplicating.\n"
+    "- A statement may contain only positions, only transactions, or both. Return "
+    "empty arrays rather than inventing either.\n"
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # --- Provider routing --------------------------------------------------------
@@ -386,6 +435,159 @@ _SUSPICIOUS_PRICE = 50_000.0  # per-share cost over this → flag as likely typo
 _SUSPICIOUS_QTY = 1_000_000.0
 
 
+def _float_value(value: Any) -> float:
+    try:
+        return max(float(value or 0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_lot_date(value: Any) -> str:
+    """Normalize common brokerage dates while preserving invalid text for review."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).date().isoformat()
+        except ValueError:
+            continue
+    # Month-name forms, which is what a brokerage app screen usually shows:
+    # "Aug 19, 2026", "August 19 2026", "19 Aug 2026". Tried on the whole
+    # string rather than the first ten characters, since these are longer.
+    cleaned = " ".join(text.replace(",", " ").split())
+    for fmt in ("%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return text
+
+
+def _normalize_tax_lot(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    acquired_at = _normalize_lot_date(
+        raw.get("acquired_at")
+        or raw.get("acquisition_date")
+        or raw.get("purchase_date")
+        or raw.get("date")
+    )
+    return {
+        "quantity": _float_value(raw.get("quantity") or raw.get("qty") or raw.get("shares")),
+        "cost_basis": _float_value(
+            raw.get("cost_basis") or raw.get("price_paid") or raw.get("average_cost")
+        ),
+        "acquired_at": acquired_at,
+    }
+
+
+_KNOWN_ACTIONS = {
+    "buy", "sell", "dividend", "interest", "fee", "tax",
+    "deposit", "withdrawal", "transfer", "fx", "split", "adjustment",
+}
+
+#: What a model is likely to call each action if it does not use our word.
+_ACTION_SYNONYMS = {
+    "purchase": "buy", "bought": "buy", "b": "buy",
+    "sale": "sell", "sold": "sell", "s": "sell",
+    "div": "dividend", "dividends": "dividend", "reinvestment": "dividend",
+    "int": "interest",
+    "commission": "fee", "charge": "fee", "expense": "fee",
+    "withholding": "tax", "tax_withheld": "tax",
+    "contribution": "deposit", "funding": "deposit", "ach_in": "deposit",
+    "distribution": "withdrawal", "ach_out": "withdrawal", "redemption": "withdrawal",
+    "journal": "transfer", "internal_transfer": "transfer",
+}
+
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _canonical_action_word(raw: Any) -> str:
+    """Reduce a broker's phrasing to one of Serin's actions.
+
+    Brokerage screens name the order type as well as the direction — "limit
+    buy", "market sell", "stop limit buy" — and matching the whole phrase
+    dropped every row from a Robinhood history screenshot. So try the phrase
+    first, then look for a known action word inside it.
+
+    Word-wise rather than substring: "sell" appears inside nothing dangerous,
+    but scanning for "buy" as a substring would match "buyback" and worse.
+    """
+    text = str(raw or "").strip().lower().replace("-", " ")
+    squashed = text.replace(" ", "_")
+    if squashed in _ACTION_SYNONYMS:
+        return _ACTION_SYNONYMS[squashed]
+    if squashed in _KNOWN_ACTIONS:
+        return squashed
+    words = [w for w in text.split() if w]
+    for word in words:
+        if word in _KNOWN_ACTIONS:
+            return word
+        if word in _ACTION_SYNONYMS:
+            return _ACTION_SYNONYMS[word]
+    return squashed
+
+
+def _normalize_transaction(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Coerce one model-output row into Serin's TransactionIn shape.
+
+    Returns None for anything undated: a transaction without a date cannot be
+    placed in a return series, and guessing one would silently move somebody's
+    performance to a day that never happened.
+    """
+    if not isinstance(raw, dict):
+        return None
+    action = _canonical_action_word(raw.get("action") or raw.get("type") or "")
+    if action not in _KNOWN_ACTIONS:
+        return None
+    occurred_at = _normalize_lot_date(
+        raw.get("occurred_at") or raw.get("date") or raw.get("trade_date")
+        or raw.get("settlement_date")
+    )
+    if not occurred_at or not _ISO_DATE.match(occurred_at):
+        # Unlike a tax lot, which a human reviews in a form, a transaction with
+        # an unparsed date would be written straight into the ledger and then
+        # silently misplace itself in every return series built from it.
+        return None
+    symbol = str(raw.get("symbol") or "").strip().upper()[:24]
+    if action in ("buy", "sell") and not symbol:
+        # A trade with no instrument cannot be replayed against a price series.
+        return None
+    quantity = abs(_float_value(raw.get("quantity") or raw.get("shares")))
+    if action in ("buy", "sell") and quantity <= 0:
+        # You cannot buy zero shares. Unparseable numbers coerce to 0, so
+        # without this an unreadable row enters the ledger as a real trade of
+        # nothing — and quietly shifts the share count it is replayed against.
+        # Cash rows are exempt: a fee or deposit has no quantity by nature.
+        return None
+    price = abs(_float_value(raw.get("price") or raw.get("amount") or raw.get("value")))
+    return {
+        "action": action,
+        "symbol": symbol,
+        "quantity": quantity,
+        "price": price,
+        "fee": abs(_float_value(raw.get("fee") or raw.get("commission"))),
+        "occurred_at": occurred_at,
+        "broker": str(raw.get("broker") or "manual").strip().lower().replace(" ", "_") or "manual",
+        # Carried through because a parsed broker export knows things a
+        # screenshot does not: an option contract is priced per share but moves
+        # 100x the cash, and storing it as a stock quietly breaks that.
+        "asset_type": _canonical_asset_type(raw.get("asset_type")),
+        "notes": str(raw.get("notes") or "").strip()[:200],
+        "external_id": str(raw.get("external_id") or raw.get("reference") or "").strip()[:120],
+    }
+
+
+_ASSET_TYPES = {"stock", "etf", "crypto", "cash", "option"}
+
+
+def _canonical_asset_type(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    return value if value in _ASSET_TYPES else "stock"
+
+
 def _normalize_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Coerce one model-output row into Serin's PositionIn shape."""
     if not isinstance(raw, dict):
@@ -393,18 +595,9 @@ def _normalize_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     symbol = str(raw.get("symbol") or "").strip().upper()
     if not symbol or len(symbol) > 24:
         return None
-    try:
-        quantity = float(raw.get("quantity") or 0)
-    except (TypeError, ValueError):
-        quantity = 0.0
-    try:
-        average_cost = float(raw.get("average_cost") or 0)
-    except (TypeError, ValueError):
-        average_cost = 0.0
-    try:
-        current_price = float(raw.get("current_price") or 0)
-    except (TypeError, ValueError):
-        current_price = 0.0
+    quantity = _float_value(raw.get("quantity"))
+    average_cost = _float_value(raw.get("average_cost"))
+    current_price = _float_value(raw.get("current_price"))
     asset_type = str(raw.get("asset_type") or "stock").strip().lower()
     if asset_type not in _KNOWN_ASSET_TYPES:
         asset_type = "stock"
@@ -412,6 +605,21 @@ def _normalize_row(raw: dict[str, Any]) -> dict[str, Any] | None:
         str(raw.get("broker") or "manual").strip().lower().replace(" ", "_") or "manual"
     )
     name = str(raw.get("name") or symbol).strip()
+    tax_lots = [
+        lot
+        for item in (raw.get("tax_lots") or [])
+        if (lot := _normalize_tax_lot(item)) is not None
+    ]
+    # Tolerate older/provider-specific output that puts a date directly on a
+    # lot-shaped position row. A later consolidation pass folds these rows
+    # under their aggregate holding.
+    if not tax_lots and any(
+        raw.get(key) for key in ("acquired_at", "acquisition_date", "purchase_date")
+    ):
+        lot = _normalize_tax_lot(raw)
+        if lot is not None:
+            tax_lots.append(lot)
+
     return {
         "symbol": symbol,
         "name": name,
@@ -421,7 +629,77 @@ def _normalize_row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "average_cost": max(average_cost, 0.0),
         "current_price": max(current_price, 0.0),
         "sector": "",
+        "tax_lots": tax_lots,
     }
+
+
+def _lot_key(lot: dict[str, Any]) -> tuple[float, float, str]:
+    return (
+        round(_float_value(lot.get("quantity")), 8),
+        round(_float_value(lot.get("cost_basis")), 8),
+        _normalize_lot_date(lot.get("acquired_at")),
+    )
+
+
+def _normalize_positions(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize model output and collapse lot-shaped duplicate positions."""
+    rows = [
+        row
+        for raw in (parsed.get("positions") or [])
+        if (row := _normalize_row(raw)) is not None
+    ]
+
+    # Some providers put lots at the top level. Attach them to the matching
+    # holding before consolidation so both accepted JSON shapes behave alike.
+    for raw_lot in parsed.get("tax_lots") or []:
+        if not isinstance(raw_lot, dict):
+            continue
+        symbol = str(raw_lot.get("symbol") or "").strip().upper()
+        broker = (
+            str(raw_lot.get("broker") or "manual")
+            .strip().lower().replace(" ", "_") or "manual"
+        )
+        lot = _normalize_tax_lot(raw_lot)
+        if lot is None:
+            continue
+        for row in rows:
+            if row["symbol"] == symbol and row["broker"] == broker:
+                row["tax_lots"].append(lot)
+                break
+
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault((row["symbol"], row["broker"], row["asset_type"]), []).append(row)
+
+    normalized: list[dict[str, Any]] = []
+    for group in grouped.values():
+        if len(group) == 1 or not any(row["tax_lots"] for row in group):
+            normalized.extend(group)
+            continue
+
+        summary_rows = [row for row in group if not row["tax_lots"]]
+        if summary_rows:
+            aggregate = max(summary_rows, key=lambda row: row["quantity"])
+        else:
+            aggregate = dict(group[0])
+            aggregate["quantity"] = sum(row["quantity"] for row in group)
+            total_cost = sum(row["quantity"] * row["average_cost"] for row in group)
+            aggregate["average_cost"] = (
+                total_cost / aggregate["quantity"] if aggregate["quantity"] else 0.0
+            )
+
+        seen: set[tuple[float, float, str]] = set()
+        lots: list[dict[str, Any]] = []
+        for row in group:
+            for lot in row["tax_lots"]:
+                key = _lot_key(lot)
+                if key not in seen:
+                    seen.add(key)
+                    lots.append(lot)
+        aggregate = dict(aggregate)
+        aggregate["tax_lots"] = lots
+        normalized.append(aggregate)
+    return normalized
 
 
 def _row_warnings(row: dict[str, Any], existing_keys: set[tuple[str, str, str]]) -> list[str]:
@@ -440,6 +718,23 @@ def _row_warnings(row: dict[str, Any], existing_keys: set[tuple[str, str, str]])
         warnings.append("duplicates an existing position — confirm overwrite")
     if row["asset_type"] == "stock" and not row["symbol"].replace(".", "").replace("-", "").isalnum():
         warnings.append("symbol looks non-standard")
+    tax_lots = row.get("tax_lots") or []
+    for index, lot in enumerate(tax_lots, start=1):
+        if _float_value(lot.get("quantity")) <= 0:
+            warnings.append(f"tax lot {index} needs a quantity")
+        if _float_value(lot.get("cost_basis")) <= 0:
+            warnings.append(f"tax lot {index} needs a per-share cost")
+        acquired_at = _normalize_lot_date(lot.get("acquired_at"))
+        try:
+            datetime.strptime(acquired_at, "%Y-%m-%d")
+        except ValueError:
+            warnings.append(f"tax lot {index} needs a valid purchase date")
+    if tax_lots and row["quantity"] > 0:
+        lot_quantity = sum(_float_value(lot.get("quantity")) for lot in tax_lots)
+        if abs(lot_quantity - row["quantity"]) > max(0.001, row["quantity"] * 0.000001):
+            warnings.append(
+                f"tax lots total {lot_quantity:g} shares, not {row['quantity']:g}"
+            )
     return warnings
 
 
@@ -453,19 +748,24 @@ def _cost_estimate(usage: dict[str, Any]) -> float:
 
 
 def _privacy_notice(entry: dict[str, Any]) -> str:
+    """Where this statement is about to go, in the user's terms.
+
+    Deliberately says *whether it leaves the machine* and not which model or
+    vendor parsed it. Naming the model turned a privacy disclosure into
+    telemetry, and the destination is the part that actually matters to
+    someone uploading a brokerage statement.
+    """
     if entry["id"] == "ollama":
-        return (
-            f"This content is parsed by your local Ollama ({entry['model']}) — "
-            "nothing leaves this machine."
-        )
+        return "This content is parsed on this machine — nothing leaves it."
     if entry["id"] == "claude_cli":
         return (
-            f"This content is parsed via your Claude CLI ({entry['model']}) — "
-            "it goes to Anthropic under your own sign-in."
+            "This content is parsed through the AI tool you signed in with on "
+            "this machine."
         )
     return (
-        f"This content will be sent to {entry['label']} ({entry['model']}) for parsing. "
-        "Crop or redact anything sensitive (account numbers, names, addresses) first."
+        "This content will be sent to the AI provider configured for this "
+        "instance for parsing. Crop or redact anything sensitive (account "
+        "numbers, names, addresses) first."
     )
 
 
@@ -480,8 +780,13 @@ async def extract(
     pdf_bytes: bytes | None = None,
     hint: str | None = None,
 ) -> dict[str, Any]:
-    """Run extraction. Returns ``{rows, warnings, provider, model, cost_usd,
-    notice, raw}``. No DB writes."""
+    """Run extraction. Returns ``{rows, transactions, notes, notice}``. No DB writes.
+
+    The provider id, model name and cost estimate are deliberately absent: the
+    import screen is for reviewing what was read out of a statement, and model
+    telemetry there reads as an unfinished developer tool. They are still
+    logged server-side, where operators need them.
+    """
     if not text and not image_bytes and not pdf_bytes:
         raise RuntimeError("Provide text, an image, or a PDF to extract from.")
     truncation_note = ""
@@ -526,7 +831,6 @@ async def extract(
         raise last_error if isinstance(last_error, RuntimeError) else RuntimeError(str(last_error))
 
     parsed = _parse_response(raw_text)
-    raw_rows = parsed.get("positions") or []
     notes = str(parsed.get("notes") or "").strip()
     if truncation_note:
         notes = f"{truncation_note} {notes}".strip()
@@ -536,33 +840,116 @@ async def extract(
         existing_keys.add((position.symbol, position.broker, position.asset_type))
 
     rows = []
-    for raw in raw_rows:
-        row = _normalize_row(raw)
-        if row is None:
-            continue
+    for row in _normalize_positions(parsed):
         row["warnings"] = _row_warnings(row, existing_keys)
         rows.append(row)
+
+    transactions = [
+        txn
+        for raw_txn in (parsed.get("transactions") or [])
+        if (txn := _normalize_transaction(raw_txn)) is not None
+    ]
+
+    logger.info(
+        "smart import: provider=%s model=%s cost=%.4f rows=%d transactions=%d",
+        entry["id"], entry["model"], _cost_estimate(usage), len(rows), len(transactions),
+    )
 
     return {
         "rows": rows,
         "row_count": len(rows),
+        "transactions": transactions,
+        "transaction_count": len(transactions),
         "notes": notes,
-        "provider": "anthropic_api" if entry["id"] == "anthropic" else entry["id"],
-        "model": entry["model"],
-        "cost_usd": _cost_estimate(usage),
         "notice": _privacy_notice(entry),
     }
+
+
+def _transaction_fingerprint(txn: dict[str, Any]) -> str:
+    """A stable id for an imported row, so the same statement lands once.
+
+    The broker's own reference is used when it gave one. Otherwise the row is
+    fingerprinted by what it *is* — date, action, instrument, size, price —
+    which is stable across re-imports of the same statement and different for
+    two genuinely separate trades. Two identical fills on the same day at the
+    same price do collide, and are treated as one; that is the deliberate
+    trade, because the alternative silently doubles somebody's contributions
+    every time they re-upload a statement.
+    """
+    import hashlib
+
+    reference = str(txn.get("external_id") or "").strip()
+    broker = txn.get("broker", "manual")
+    if reference:
+        return f"{broker}:{reference}"[:120]
+    seed = "|".join(
+        str(txn.get(key, ""))
+        for key in ("occurred_at", "action", "symbol", "quantity", "price", "fee", "broker")
+    )
+    return "fp:" + hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
+def import_transactions(transactions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Commit reviewed transactions, skipping any already imported.
+
+    Idempotency is enforced by the database's partial unique index rather than
+    a read-then-write check here: two concurrent imports of the same statement
+    would both pass a pre-check and both insert.
+    """
+    from backend import db
+    from backend.models import TransactionIn
+
+    inserted = skipped = 0
+    for raw_txn in transactions:
+        # Normalise here rather than trusting the caller. The extract path
+        # already does it, but this endpoint takes whatever a client sends —
+        # including rows a user edited by hand in the review table — and
+        # TransactionIn's action is a closed set, so an unnormalised "limit
+        # buy" would be silently skipped as a validation failure.
+        txn = _normalize_transaction(raw_txn)
+        if txn is None:
+            skipped += 1
+            continue
+        fingerprint = _transaction_fingerprint(txn)
+        try:
+            row = TransactionIn(
+                symbol=txn.get("symbol", ""),
+                broker=txn.get("broker", "manual"),
+                action=txn.get("action", "buy"),
+                quantity=float(txn.get("quantity") or 0),
+                price=float(txn.get("price") or 0),
+                fee=float(txn.get("fee") or 0),
+                asset_type=txn.get("asset_type", "stock"),
+                notes=txn.get("notes", ""),
+                occurred_at=txn["occurred_at"],
+            )
+        except Exception:
+            skipped += 1
+            continue
+        created = db.create_transaction(row, source="import", external_id=fingerprint)
+        if created is None:
+            skipped += 1
+        else:
+            inserted += 1
+    return {"inserted": inserted, "skipped": skipped}
 
 
 def bulk_insert(rows: list[dict[str, Any]], *, replace: bool = False) -> dict[str, Any]:
     """Commit user-confirmed rows. Upserts on (symbol, broker, asset_type)
     when ``replace`` is True; otherwise creates new and skips duplicates."""
-    from backend.models import PositionIn
+    from backend.models import PositionIn, TaxLotIn
 
     inserted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    tax_lots_inserted = 0
+    tax_lots_skipped = 0
+    tax_lot_skip_details: list[dict[str, Any]] = []
     existing_keys = {
         (p.symbol, p.broker, p.asset_type) for p in db.list_positions()
+    }
+    existing_lot_keys = {
+        (lot.symbol, lot.broker, round(lot.quantity, 8), round(lot.cost_basis, 8), lot.acquired_at)
+        for lot in db.list_tax_lots()
     }
 
     for raw in rows:
@@ -584,16 +971,75 @@ def bulk_insert(rows: list[dict[str, Any]], *, replace: bool = False) -> dict[st
         key = (position_in.symbol, position_in.broker, position_in.asset_type)
         if key in existing_keys and not replace:
             skipped.append({"raw": raw, "error": "duplicate"})
-            continue
-        if key in existing_keys and replace:
+        elif key in existing_keys and replace:
             saved = db.upsert_position(position_in)
         else:
             saved = db.create_position(position_in)
-        inserted.append(saved.model_dump() if hasattr(saved, "model_dump") else saved.__dict__)
+        if key not in existing_keys or replace:
+            inserted.append(saved.model_dump() if hasattr(saved, "model_dump") else saved.__dict__)
+            existing_keys.add(key)
+
+        for raw_lot in raw.get("tax_lots") or []:
+            lot = _normalize_tax_lot(raw_lot)
+            try:
+                tax_lot_in = TaxLotIn(
+                    symbol=position_in.symbol,
+                    broker=position_in.broker,
+                    quantity=lot["quantity"] if lot else 0,
+                    cost_basis=lot["cost_basis"] if lot else 0,
+                    acquired_at=lot["acquired_at"] if lot else "",
+                )
+                # TaxLotIn deliberately accepts arbitrary nonblank date text;
+                # Smart Import is stricter because downstream calculations
+                # require an ISO calendar date.
+                datetime.strptime(tax_lot_in.acquired_at, "%Y-%m-%d")
+            except Exception as exc:
+                tax_lots_skipped += 1
+                tax_lot_skip_details.append({"raw": raw_lot, "error": str(exc)})
+                continue
+            lot_key = (
+                tax_lot_in.symbol,
+                tax_lot_in.broker,
+                round(tax_lot_in.quantity, 8),
+                round(tax_lot_in.cost_basis, 8),
+                tax_lot_in.acquired_at,
+            )
+            if lot_key in existing_lot_keys:
+                tax_lots_skipped += 1
+                tax_lot_skip_details.append({"raw": raw_lot, "error": "duplicate"})
+                continue
+            db.create_tax_lot(tax_lot_in)
+            existing_lot_keys.add(lot_key)
+            tax_lots_inserted += 1
+
+    refreshed = 0
+    if inserted:
+        # The document was authoritative about WHAT the user holds, never
+        # about what it's worth right now — statements and screenshots are as
+        # old as whenever they were taken, and those prices sat on the rows
+        # verbatim until someone happened to press Refresh. Re-price
+        # immediately; cache-first, so on a shared deployment this is usually
+        # a database read. Never let pricing fail the import that just worked.
+        import logging
+
+        from backend import prices
+
+        try:
+            refreshed = prices.refresh_prices(
+                {str(row.get("symbol") or "") for row in inserted}
+            ).get("updated", 0)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Post-import price refresh failed; imported prices kept", exc_info=True
+            )
 
     return {
         "inserted": len(inserted),
         "skipped": len(skipped),
+        "refreshed": refreshed,
         "positions": inserted,
         "skip_details": skipped,
+        "tax_lots_inserted": tax_lots_inserted,
+        "tax_lots_skipped": tax_lots_skipped,
+        "tax_lot_skip_details": tax_lot_skip_details,
     }

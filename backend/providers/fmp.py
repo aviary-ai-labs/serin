@@ -12,6 +12,7 @@ from typing import Any
 
 from backend.config import settings
 from backend.models import Position
+from backend.redaction import redact
 
 
 def _symbol(symbol: str, asset_type: str) -> str:
@@ -39,7 +40,7 @@ def _get(
     try:
         import httpx
     except Exception as exc:
-        return None, f"FMP unavailable: {exc!r}"
+        return None, redact(f"FMP unavailable: {exc!r}")
 
     # DB/portal-supplied key wins; fall back to the FMP_API_KEY env var.
     api_key = (api_key if api_key is not None else settings.fmp_api_key).strip()
@@ -52,7 +53,10 @@ def _get(
         response.raise_for_status()
         return response.json(), None
     except Exception as exc:
-        return None, f"FMP request failed: {exc!r}"
+        # httpx puts the full request URL in its exception repr, and the key
+        # rides in the query string — this message reached the application log
+        # with a live credential in it.
+        return None, redact(f"FMP request failed: {exc!r}")
 
 
 def _rows(payload: Any) -> list[dict[str, Any]]:
@@ -91,6 +95,11 @@ def _period_start(period: str) -> str:
     return (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
 
 
+def _has_no_sector(position: Position | None) -> bool:
+    """Asset classes for which no provider reports a sector."""
+    return position is not None and position.asset_type in ("crypto", "cash")
+
+
 @dataclass
 class FMPProvider:
     name: str = "fmp"
@@ -100,6 +109,44 @@ class FMPProvider:
     def _fetch(self, path: str, params: dict[str, str]):
         return _get(path, params, self.api_key, self.base_url)
 
+    #: Symbols per batched quote request.
+    BATCH_SIZE = 50
+
+    def _batch_quotes(self, by_symbol: dict[str, Position]) -> dict[str, float]:
+        """Prices for as many symbols as one request will return.
+
+        The loop below asks per symbol, and asks `stable/profile` first because
+        it carries the sector — so a 21-holding sweep spent 21 requests to
+        learn 21 numbers, four times an hour. Sector is a fact about a company
+        that does not change between sweeps; the price is the only thing worth
+        re-asking for, and the quote endpoint takes a list.
+
+        Best-effort: whatever this does not answer for falls through to the
+        per-symbol path below, so an endpoint change costs requests rather than
+        prices.
+        """
+        lookups = {
+            _symbol(symbol, position.asset_type): symbol
+            for symbol, position in by_symbol.items()
+        }
+        found: dict[str, float] = {}
+        ordered = sorted(lookups)
+        for start in range(0, len(ordered), self.BATCH_SIZE):
+            chunk = ordered[start:start + self.BATCH_SIZE]
+            payload, error = self._fetch("stable/quote", {"symbol": ",".join(chunk)})
+            if error:
+                break
+            for row in _rows(payload) or []:
+                if not isinstance(row, dict):
+                    continue
+                ours = lookups.get(str(row.get("symbol") or ""))
+                if not ours:
+                    continue
+                price = _first_number(row, ("price", "previousClose", "open"))
+                if price > 0:
+                    found[ours] = price
+        return found
+
     def refresh_prices(self, positions: list[Position]) -> dict:
         prices: dict[str, tuple[float, str]] = {}
         errors: list[str] = []
@@ -108,14 +155,34 @@ class FMPProvider:
         for position in positions:
             by_symbol.setdefault(position.symbol, position)
 
+        # A batched price for everything the quote endpoint knows, then the
+        # per-symbol path only for what is left. Sector comes with the profile
+        # call below, so a symbol whose sector is already on file needs no
+        # second request at all.
+        batched = self._batch_quotes(by_symbol)
+        known_sector = {
+            position.symbol: (position.sector or "").strip()
+            for position in positions
+        }
+        for symbol, price in batched.items():
+            sector = known_sector.get(symbol, "")
+            # A coin has no sector to look up, so a batched price is the whole
+            # answer. Falling through to the profile call for it spent a
+            # request every sweep to learn nothing — on a 250-a-day budget that
+            # is half the sweep's cost.
+            if sector or _has_no_sector(by_symbol.get(symbol)):
+                prices[symbol] = (price, sector)
+
         for symbol, position in sorted(by_symbol.items()):
+            if symbol in prices:
+                continue
             lookup = _symbol(symbol, position.asset_type)
             profile_payload, profile_error = self._fetch("stable/profile", {"symbol": lookup})
             if profile_error:
                 errors.append(f"{symbol}: {profile_error}")
                 continue
             profile = (_rows(profile_payload) or [{}])[0]
-            price = _first_number(profile, ("price",))
+            price = batched.get(symbol) or _first_number(profile, ("price",))
             sector = str(profile.get("sector") or "").strip()
             if not sector and position.asset_type == "etf":
                 sector = str(profile.get("category") or profile.get("industry") or "ETF").strip()

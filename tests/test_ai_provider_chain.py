@@ -230,7 +230,8 @@ def test_gateway_html_errors_become_readable():
 # --- Smart Import falls through the vision waterfall -------------------------
 
 
-def test_import_vision_fallback_tries_next_provider(clean_env, monkeypatch):
+def test_import_vision_fallback_tries_next_provider(clean_env, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="backend.smart_import")
     import asyncio
 
     from backend import smart_import
@@ -249,11 +250,15 @@ def test_import_vision_fallback_tries_next_provider(clean_env, monkeypatch):
 
     monkeypatch.setattr(smart_import, "_call_anthropic", failing_anthropic)
     monkeypatch.setattr(smart_import, "_call_openai_compat", working_openai)
-    result = asyncio.run(smart_import.extract(image_bytes=b"png", image_mime="image/png"))
-    assert result["provider"] == "openai"
+    asyncio.run(smart_import.extract(image_bytes=b"png", image_mime="image/png"))
+    # provider/model/cost left the API response deliberately (the import
+    # screen is not a place for model telemetry), so the fallback is
+    # observed in the server log, where operators read it.
+    assert "provider=openai" in caplog.text
 
 
-def test_claude_cli_import_writes_pages_and_parses_reply(clean_env, monkeypatch):
+def test_claude_cli_import_writes_pages_and_parses_reply(clean_env, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="backend.smart_import")
     """CLI extraction: pages land on disk for the agent to read, and are gone
     after the call. The subprocess is stubbed; everything around it is real."""
     import asyncio
@@ -277,5 +282,5 @@ def test_claude_cli_import_writes_pages_and_parses_reply(clean_env, monkeypatch)
     result = asyncio.run(smart_import.extract(image_bytes=b"fakepng", image_mime="image/png"))
     assert seen["files"] == ["page-1.png"]
     assert seen["prompt_mentions_page"] is True
-    assert result["provider"] == "claude_cli"
+    assert "provider=claude_cli" in caplog.text
     assert result["rows"][0]["symbol"] == "NKE"

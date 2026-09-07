@@ -2,7 +2,7 @@ const API = '';
 
 // App lock: the session cookie does the real work for the web UI; the token
 // mirror in localStorage covers dev setups where the Vite proxy strips
-// cookies, and is what the mobile pairing QR embeds.
+// cookies.
 const TOKEN_KEY = 'serin_token';
 
 export function getAuthToken() {

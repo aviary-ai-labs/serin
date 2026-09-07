@@ -1,13 +1,15 @@
 # Serin Privacy Policy
 
-*Effective 2026-07-02 · applies to the Serin web app and the Serin mobile app*
+*Effective 2026-08-25 · applies to the Serin web app and the Serin mobile app*
 
 ## The short version
 
 Serin is open-source software you run yourself. **When you self-host, we run
 no servers and collect nothing** — your portfolio lives in a database on
-hardware you control, and the mobile app is a client for *your* server only.
-That is the default and it is free forever.
+hardware you control, and you use it through your browser. That is the
+default and it is free forever. (The mobile app is a Serin Cloud client and
+does not connect to a self-hosted instance, so self-hosting and the app are
+never mixed.)
 
 **Serin Cloud is different, and this policy says so plainly.** If you buy the
 hosted plan, we operate the server and your data sits in a database we
@@ -20,8 +22,8 @@ the two.
 |---|---|---|
 | Positions, transactions, accounts, briefings | SQLite on your server (self-host) or our managed Postgres (Cloud) | self-host: never leaves your infrastructure by default |
 | Provider API keys, broker credentials | Your server, AES-256-GCM encrypted at rest | see SECURITY.md |
-| Mobile: server URL + access token | Device Keychain/Keystore (SecureStore) | removable in Settings |
-| Mobile: last portfolio snapshot | Device local storage | for offline display; cleared by reinstall |
+| Mobile: server URL + access token | Device Keychain/Keystore (SecureStore) | cleared by signing out or editing them in Settings. Note that the OS keychain outlives the app: deleting Serin does **not** by itself remove them, so sign out first if you are handing the device on |
+| Mobile: last portfolio snapshot | Device local storage | for offline display; cleared by signing out or deleting the app |
 
 ## Network connections your server makes (all optional, all user-configured)
 
@@ -73,8 +75,11 @@ what is needed to operate and support the service.
 - Export or delete everything: Connectors → Data → backup/restore, or delete
   the database file. On Cloud the same export works, including after you
   cancel — a lapsed subscription suspends access, it never deletes your data.
-- Revoke mobile access: change `SERIN_AUTH_PASSWORD` (self-host) or change
-  your password (Cloud) — either rotates every outstanding token.
+- Sign out of the mobile app: Settings → Sign out, which removes the access
+  token and the cached portfolio from that device.
+- Revoke access everywhere at once: change `SERIN_AUTH_PASSWORD` (self-host)
+  or change your password (Cloud) — either rotates every outstanding token,
+  including ones on devices you no longer have.
 - Close a Cloud account and have its data deleted: email us and we will action
   it.
 - Questions / issues: open a GitHub issue on the Serin repository.

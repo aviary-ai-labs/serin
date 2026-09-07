@@ -1,6 +1,25 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { money, signedMoney, signedPct, brokerLabel, allocColor } from '../format.js';
 
+/** The window start for a range, or null for "everything". */
+export function rangeCutoff(range) {
+  const now = new Date();
+  if (range === '1W') return new Date(now.getTime() - 7 * 86400000);
+  if (range === '1M') return new Date(now.getTime() - 30 * 86400000);
+  if (range === '3M') return new Date(now.getTime() - 90 * 86400000);
+  if (range === 'YTD') return new Date(now.getFullYear(), 0, 1);
+  return null;
+}
+
+/** Index of the last entry at or before `cutoffStr`, else 0. Same boundary as
+ *  backend.analytics._find_at_or_before: a period starts at the previous
+ *  close, not at the first one inside it. */
+export function anchorIndex(dates, cutoffStr) {
+  let anchor = -1;
+  for (let i = 0; i < dates.length && dates[i] <= cutoffStr; i += 1) anchor = i;
+  return anchor >= 0 ? anchor : 0;
+}
+
 export function filterHistoryByRange(history, range) {
   const dates = history?.dates || [];
   const closes = history?.closes || [];
@@ -13,13 +32,17 @@ export function filterHistoryByRange(history, range) {
   if (range === 'YTD') cutoff = new Date(now.getFullYear(), 0, 1);
   if (!cutoff) return { dates, closes };
   const cutoffStr = cutoff.toISOString().slice(0, 10);
-  const filtered = dates.reduce((acc, date, idx) => {
-    if (date >= cutoffStr) {
-      acc.dates.push(date);
-      acc.closes.push(closes[idx]);
-    }
-    return acc;
-  }, { dates: [], closes: [] });
+  // Anchor the window at the last close AT OR BEFORE the cutoff — "YTD"
+  // means since Dec 31's close, not since whatever the first trading day of
+  // January happened to be. dates is ascending (backend query: ORDER BY
+  // date), so the anchor is the last index that hasn't yet crossed cutoff.
+  // The backend's period cards use the same "at or before" boundary
+  // (_find_at_or_before); using ">=" here alone started this chart's window
+  // one trading day later than the cards and understated every return.
+  let anchorIdx = -1;
+  for (let i = 0; i < dates.length && dates[i] <= cutoffStr; i += 1) anchorIdx = i;
+  const startIdx = anchorIdx >= 0 ? anchorIdx : 0;
+  const filtered = { dates: dates.slice(startIdx), closes: closes.slice(startIdx) };
   return filtered.dates.length >= 2 ? filtered : { dates, closes };
 }
 
@@ -79,7 +102,7 @@ export function MiniSparkline({ dates = [], values = [], baseline = null, format
   );
 }
 
-export function PortfolioTrendChart({ positions, priceHistory, dateRange, onRangeChange }) {
+export function PortfolioTrendChart({ positions, priceHistory, dateRange, onRangeChange, ledger }) {
   const [hover, setHover] = useState(null);
   const [brokerFilter, setBrokerFilter] = useState('all');
   const svgRef = useRef(null);
@@ -93,6 +116,79 @@ export function PortfolioTrendChart({ positions, priceHistory, dateRange, onRang
   ), [positions]);
 
   const data = useMemo(() => {
+    // The ledger reconstructs what was actually held on each day. The
+    // per-symbol path below cannot: it takes *today's* quantities and prices
+    // them backwards, which answers "what if I had held exactly this all
+    // along" — a counterfactual, and a badly misleading one for anyone who
+    // traded. Prefer the real thing wherever it exists.
+    //
+    // Selecting one account narrows the same reconstruction rather than
+    // abandoning it. This used to fall back, on the belief that daily_values
+    // could not be filtered — it takes positions and transactions as
+    // arguments, so it always could. The fallback showed a Robinhood account
+    // that had $145,000 withdrawn from it as +6.29%, computed from a basket it
+    // never held, beside a whole-portfolio figure it could not be reconciled
+    // with.
+    const scoped = brokerFilter === 'all' ? null : ledger?.by_broker?.[brokerFilter];
+    const ledgerSeries = (brokerFilter === 'all' ? ledger?.series : scoped?.series) || [];
+    const ledgerUsable = ledgerSeries.length >= 3
+      && (brokerFilter === 'all' ? Boolean(ledger?.coverage?.quality
+          && ['complete', 'partial', 'missing_cash_activity'].includes(ledger.coverage.quality))
+        : Boolean(scoped));
+    if (ledgerUsable) {
+      const cutoff = rangeCutoff(dateRange);
+      const dates = ledgerSeries.map(point => point.date);
+      let from = cutoff ? anchorIndex(dates, cutoff.toISOString().slice(0, 10)) : 0;
+
+      // Where the ledger contradicts the holdings, the reconstruction before
+      // that point is not a rougher estimate of this portfolio — it is a
+      // different one. Start after it rather than plot it.
+      const reliable = scoped ? scoped.reliable_from : ledger?.coverage?.reliable_from;
+      if (reliable) from = Math.max(from, anchorIndex(dates, reliable));
+
+      const window = ledgerSeries.slice(from);
+      // Portfolio value, cash included — not the securities sleeve alone.
+      // Buying does not make you richer and selling does not make you poorer;
+      // both move value between cash and stock, so plotting only the stock
+      // half draws a transfer as a gain. Moving $226k of cash into shares
+      // over one year read as "+$186,332.02 (+49.55%)" while the portfolio
+      // itself was down $40,130. Same boundary portfolio_history reconstructs
+      // against, so the line answers the question its own numbers answer.
+      const start = window.length ? window[0].total : 0;
+
+      // A start of zero used to yield changePct: 0 while `change` kept the
+      // full end value — which is how a $585k portfolio came to report
+      // "+$1,059,137.85 (+0.00%)". There is no honest percentage to show
+      // against a zero base, so this declines the ledger basis instead of
+      // inventing one, and the price-history path below answers instead.
+      if (window.length >= 3 && start > 0) {
+        return {
+          basis: 'ledger',
+          truncatedTo: reliable && from > 0 ? window[0].date : null,
+          // Time-weighted return for this range, computed server-side. The
+          // headline measure: it breaks the series at every deposit and
+          // withdrawal, so the owner's own transfers cannot read as
+          // performance. A value change cannot do that, and called a year
+          // that earned $22,645 a 12.62% loss because $145,000 was withdrawn.
+          ranged: (scoped ? scoped.returns : ledger?.returns)?.[dateRange.toLowerCase()] || null,
+          // Scoped to the selected account, so the cost and count under the
+          // line describe the same thing the line does.
+          currentCost: positions
+            .filter(p => brokerFilter === 'all' || p.broker === brokerFilter)
+            .reduce((sum, p) => sum + (p.total_cost || 0), 0),
+          trackedCount: positions.filter(p => !['cash', 'option'].includes(p.asset_type)
+            && (brokerFilter === 'all' || p.broker === brokerFilter)).length,
+          lateSymbols: [],
+          series: window.map(point => ({
+            date: point.date,
+            value: point.total,
+            change: point.total - start,
+            changePct: ((point.total - start) / start) * 100,
+          })),
+        };
+      }
+    }
+
     const tracked = positions.filter(position => (
       !['cash', 'option'].includes(position.asset_type)
       && priceHistory[position.symbol]?.dates?.length
@@ -100,37 +196,79 @@ export function PortfolioTrendChart({ positions, priceHistory, dateRange, onRang
     ));
     if (!tracked.length) return null;
     const bySymbol = {};
+    const plottable = [];
     tracked.forEach(position => {
       const filtered = filterHistoryByRange(priceHistory[position.symbol], dateRange);
+      if (!filtered.dates.length) return; // nothing in this window — can't plot it
+      plottable.push(position);
       bySymbol[position.symbol] = Object.fromEntries(filtered.dates.map((date, idx) => [date, filtered.closes[idx]]));
     });
+    if (!plottable.length) return null;
+    const symbols = new Set(plottable.map(position => position.symbol));
     const dates = [...new Set(Object.values(bySymbol).flatMap(item => Object.keys(item)))].sort();
+    // A symbol missing a date means "no close reported yet", never "the
+    // position vanished" — free providers finalize some symbols a day late,
+    // so tails are routinely ragged. Carry each symbol's last close forward;
+    // summing without it used to draw a cliff the size of the whole holding.
+    // The series starts once every symbol has reported at least one close,
+    // for the same reason in mirror: a partial early sum is a fake ramp-up.
+    // Waiting for *every* symbol before plotting anything means the newest
+    // listing decides how far back the chart goes. One holding worth $141 of
+    // $872,355 — a recent IPO with 53 days of history — cut eight months off
+    // the portfolio trend, which is a far bigger lie than the ramp-up the rule
+    // was written to prevent.
+    //
+    // So wait for enough *value* rather than every symbol. Below the
+    // threshold the sum really would be a fake ramp; above it, what is
+    // missing is bounded by construction, and the alternative is showing no
+    // history at all.
+    const COVERAGE = 0.95;
+    const valueBySymbol = {};
+    plottable.forEach(position => {
+      valueBySymbol[position.symbol] =
+        (valueBySymbol[position.symbol] || 0) + Math.abs(position.market_value || 0);
+    });
+    const totalValue = Object.values(valueBySymbol).reduce((sum, v) => sum + v, 0);
+
+    const seen = {};
     const series = [];
     dates.forEach(date => {
-      let value = 0;
-      let count = 0;
-      tracked.forEach(position => {
-        const close = bySymbol[position.symbol]?.[date];
-        if (close != null) {
-          value += close * position.quantity;
-          count += 1;
-        }
+      symbols.forEach(symbol => {
+        const close = bySymbol[symbol]?.[date];
+        if (close != null) seen[symbol] = close;
       });
-      if (count >= Math.max(1, tracked.length * 0.5)) series.push({ date, value });
+      const covered = Object.keys(seen).reduce((sum, s) => sum + (valueBySymbol[s] || 0), 0);
+      // No total to weigh against (every holding priced at zero) — fall back
+      // to the original all-symbols rule rather than dividing by zero.
+      if (totalValue > 0 ? covered / totalValue < COVERAGE
+                         : Object.keys(seen).length < symbols.size) return;
+      let value = 0;
+      plottable.forEach(position => {
+        const close = seen[position.symbol];
+        if (close != null) value += close * position.quantity;
+      });
+      series.push({ date, value });
     });
     if (series.length < 3) return null;
+    // Which holdings could not be shown for the whole span, so the header can
+    // say so instead of the reader wondering why the line starts in June.
+    const lateSymbols = [...symbols].filter(
+      symbol => (bySymbol[symbol] && Object.keys(bySymbol[symbol])[0] > series[0].date)
+    );
     const start = series[0].value;
-    const currentCost = tracked.reduce((sum, position) => sum + position.total_cost, 0);
+    const currentCost = plottable.reduce((sum, position) => sum + position.total_cost, 0);
     return {
+      basis: 'holdings',
       currentCost,
-      trackedCount: tracked.length,
+      trackedCount: plottable.length,
+      lateSymbols,
       series: series.map(point => ({
         ...point,
         change: point.value - start,
         changePct: start > 0 ? ((point.value - start) / start) * 100 : 0,
       })),
     };
-  }, [positions, priceHistory, dateRange, brokerFilter]);
+  }, [positions, priceHistory, dateRange, brokerFilter, ledger]);
 
   useEffect(() => {
     if (brokerFilter !== 'all' && !brokerOptions.includes(brokerFilter)) setBrokerFilter('all');
@@ -214,13 +352,76 @@ function ChartReadout({ data, hover }) {
   const series = data.series;
   const active = hover != null ? series[hover] : series[series.length - 1];
   const tone = active.change >= 0 ? 'positive' : 'negative';
+  // Only when the flows are actually known. Without the ledger there is
+  // nothing to neutralise against, and a "return" that quietly counts
+  // transfers as performance is the error this replaces.
+  const ret = data.basis === 'ledger' && data.ranged?.twr_pct != null
+    ? data.ranged : null;
+  const retTone = ret && ret.twr_pct >= 0 ? 'positive' : 'negative';
   return (
     <div className="chart-readout">
       <span>{series[0].date} – {active.date}</span>
-      <span>{data.trackedCount} tracked · cost <b>{money(data.currentCost)}</b></span>
-      <span className={`readout-main ${tone}`}>
-        {signedMoney(active.change)} ({signedPct(active.changePct)})
+      <span>
+        {data.trackedCount} tracked · cost <b>{money(data.currentCost)}</b>
+        {/* Named, not just counted: without this the line simply starts in
+            June and the reader has no way to know a recent listing is why. */}
+        {data.lateSymbols?.length > 0 && (
+          <span className="chart-note" title={
+            `${data.lateSymbols.join(', ')} joined the chart later — their price history `
+            + 'does not cover the whole period.'
+          }>
+            {' · '}{data.lateSymbols.length} joined later
+          </span>
+        )}
+        {/* Which question the line answers. The two are not interchangeable
+            and the difference is large for anyone who trades. */}
+        <span className="chart-note" title={
+          data.basis === 'ledger'
+            ? 'Reconstructed from your transactions: the value of everything you held '
+              + 'on each day, cash included. Buying and selling do not move it — they '
+              + 'shift value between cash and stock — but deposits and withdrawals do, '
+              + 'so the change below is still not a return.'
+            : 'No transaction history for this view, so today\u2019s holdings are priced '
+              + 'backwards. It shows what this basket would have done, not what you did.'
+        }>
+          {' · '}{data.basis === 'ledger' ? 'from your transactions' : 'today\u2019s holdings, priced back'}
+        </span>
+        {/* The window was cut short because the ledger and the holdings
+            disagree before this date — more shares sold or bought than were
+            ever held. Saying so beats a line that silently starts late. */}
+        {data.truncatedTo && (
+          <span className="chart-note" title={
+            'Your transactions and your current holdings disagree before '
+            + `${data.truncatedTo}, so history earlier than that cannot be `
+            + 'reconstructed. Check the Transactions tab for duplicated or '
+            + 'missing trades.'
+          }>
+            {' · '}starts {data.truncatedTo}
+          </span>
+        )}
       </span>
+      <span className={`readout-main ${ret ? retTone : tone}`}>
+        {/* Return leads where we can measure one. A withdrawal is not a loss
+            and a deposit is not a gain; only a flow-neutralised return says
+            so, and it is the figure a brokerage statement shows. The value
+            change stays underneath, where it explains the gap rather than
+            standing in for performance. */}
+        {ret ? signedPct(ret.twr_pct) : `${signedMoney(active.change)} (${signedPct(active.changePct)})`}
+        <em className="readout-basis">
+          {ret ? 'return' : (data.basis === 'ledger' ? 'portfolio value change' : 'price change')}
+        </em>
+      </span>
+      {/* Where the two numbers differ, say why in the same breath. A reader
+          who sees a positive return above a falling line is owed the reason
+          on the spot, not left to work out that they withdrew the difference. */}
+      {ret && Math.abs(ret.net_external) > 0.5 && (
+        <span className="readout-flow">
+          {signedMoney(ret.value_change)} in value ·{' '}
+          {ret.net_external < 0
+            ? `${money(Math.abs(ret.net_external))} withdrawn`
+            : `${money(ret.net_external)} added`}
+        </span>
+      )}
     </div>
   );
 }

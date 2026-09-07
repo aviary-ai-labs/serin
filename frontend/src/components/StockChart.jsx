@@ -36,7 +36,38 @@ function signedPctText(pct) {
   return `${sign}${Math.abs(pct).toFixed(2)}%`;
 }
 
-export function StockChart({ symbol, assetType = 'stock', currency = 'USD', height = 280 }) {
+/**
+ * Series cache, keyed by symbol+period+asset type.
+ *
+ * Without it every re-selection is a fresh round trip: clicking through five
+ * holdings and back re-fetches the first one, and toggling 3M → 1Y → 3M costs
+ * three requests for two answers. The data is daily closes — it does not
+ * change while you are looking at it — so the only cost of holding it is
+ * memory, and a page load clears it.
+ *
+ * Exported so the dashboard can seed it: it already fetches 3M history for
+ * every holding to draw the sparklines, which is exactly what the inspector
+ * would otherwise request one symbol at a time.
+ */
+const seriesCache = new Map();
+
+/** Days per period key, for trimming a wider cached series to a narrower view. */
+const PERIOD_CUTOFF = { '1w': 7, '1m': 31, '3m': 92, ytd: 0, '1y': 366 };
+
+const cacheKey = (symbol, period, assetType) =>
+  `${String(symbol).toUpperCase()}|${period}|${assetType}`;
+
+export function primeStockChartCache(history, period = '3m', assetType = 'stock') {
+  Object.entries(history || {}).forEach(([symbol, series]) => {
+    if (!series?.dates?.length) return;
+    const key = cacheKey(symbol, period, assetType);
+    if (!seriesCache.has(key)) {
+      seriesCache.set(key, { symbol, period, dates: series.dates, closes: series.closes });
+    }
+  });
+}
+
+export function StockChart({ symbol, assetType = 'stock', currency = 'USD', height = 280, showSource = true }) {
   const [period, setPeriod] = useState('3m');
   const [showMA, setShowMA] = useState(true);
   const [data, setData] = useState(null);
@@ -47,11 +78,40 @@ export function StockChart({ symbol, assetType = 'stock', currency = 'USD', heig
 
   useEffect(() => {
     let cancelled = false;
+    const key = cacheKey(symbol, period, assetType);
+    let cached = seriesCache.get(key);
+    if (!cached) {
+      // A longer cached window contains a shorter one. Trimming what we have
+      // beats a round trip for data already in memory — the dashboard seeds a
+      // year, and the default view is three months of it.
+      const wider = seriesCache.get(cacheKey(symbol, '1y', assetType));
+      const cutoff = PERIOD_CUTOFF[period];
+      if (wider && cutoff) {
+        const from = new Date(Date.now() - cutoff * 86400000).toISOString().slice(0, 10);
+        const start = wider.dates.findIndex(d => d >= from);
+        if (start > -1 && wider.dates.length - start > 1) {
+          cached = {
+            ...wider, period,
+            dates: wider.dates.slice(start),
+            closes: wider.closes.slice(start),
+          };
+        }
+      }
+    }
+    if (cached) {
+      setData(cached);
+      setError('');
+      setLoading(false);
+      return undefined;
+    }
+    // Keep the previous series on screen while the new one loads. Blanking to
+    // "Loading…" on every period toggle reads as much slower than it is.
     setLoading(true);
     setError('');
     api(`/api/v1/quote/${encodeURIComponent(symbol)}/history?period=${period}&asset_type=${assetType}`)
       .then(payload => {
         if (cancelled) return;
+        seriesCache.set(key, payload);
         setData(payload);
       })
       .catch(err => {
@@ -160,7 +220,9 @@ export function StockChart({ symbol, assetType = 'stock', currency = 'USD', heig
       <div className="stock-chart-head">
         <div className="stock-chart-readout">
           <div className="stock-chart-price">{formatPrice(activeClose, currency)}</div>
-          <div className={`stock-chart-change ${positive ? 'pos' : 'neg'}`}>
+          {/* Tint follows the number shown — the hovered point's change — not
+              the period's direction, or a gain reads red on a down window. */}
+          <div className={`stock-chart-change ${activeClose - first >= 0 ? 'pos' : 'neg'}`}>
             {signedPrice(activeClose - first, currency)} · {signedPctText(((activeClose - first) / first) * 100)}
           </div>
           <div className="stock-chart-meta">
@@ -264,7 +326,7 @@ export function StockChart({ symbol, assetType = 'stock', currency = 'USD', heig
           {PERIOD_LABEL[period]} · <strong className={positive ? 'pos' : 'neg'}>{signedPctText(periodChangePct)}</strong> ({signedPrice(periodChange, currency)})
         </span>
         {showMA && <span className="stock-chart-legend"><i className="ma-swatch" /> 50-day MA</span>}
-        {data?.provider && <span className="stock-chart-source">Source: {data.provider}</span>}
+        {showSource && data?.provider && <span className="stock-chart-source">Source: {data.provider}</span>}
       </div>
     </div>
   );

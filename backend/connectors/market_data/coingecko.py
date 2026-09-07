@@ -31,7 +31,13 @@ class CoinGeckoConnector(MarketDataConnector):
         ),
         icon="ti-currency-bitcoin",
         docs_url="https://www.coingecko.com/en/api",
-        default_enabled=False,  # opt-in layer over the main provider
+        # On by default. It needs no key, and it is the only source in the
+        # tree that prices a coin at all: the generalist providers either
+        # refuse crypto or — worse — answer from a same-named equity. Cboe
+        # returns "BTC" at about $35 because that is a listed stock, and a
+        # deployment holding bitcoin with this switched off gets no price from
+        # anywhere. Off, it made crypto quietly unpriceable out of the box.
+        default_enabled=True,
         asset_scope="crypto",
         config_schema=[
             ConfigField(

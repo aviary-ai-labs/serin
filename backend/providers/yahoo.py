@@ -9,12 +9,15 @@ without an FMP subscription — the same baseline Ghostfolio gives self-hosters.
 
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from backend.models import Position
+from backend.redaction import redact
 
 
 def _symbol(symbol: str, asset_type: str) -> str:
@@ -94,7 +97,7 @@ def _get(path: str, params: dict[str, str]) -> tuple[Any | None, str | None]:
     try:
         import httpx
     except Exception as exc:
-        return None, f"Yahoo unavailable: {exc!r}"
+        return None, redact(f"Yahoo unavailable: {exc!r}")
 
     headers = _HEADERS
 
@@ -113,19 +116,44 @@ def _get(path: str, params: dict[str, str]) -> tuple[Any | None, str | None]:
             if status not in _RETRYABLE_STATUSES:
                 return None, last_error
         except httpx.TransportError as exc:
-            last_error = f"Yahoo request failed: {exc!r}"
+            last_error = redact(f"Yahoo request failed: {exc!r}")
         except Exception as exc:
-            return None, f"Yahoo request failed: {exc!r}"
+            return None, redact(f"Yahoo request failed: {exc!r}")
         if attempt < _MAX_ATTEMPTS - 1:
             _sleep(_BACKOFF_BASE_SECONDS * (attempt + 1))
     return None, last_error
 
 
-def _chart(symbol: str, range_: str, interval: str = "1d") -> tuple[dict | None, str | None]:
-    payload, error = _get(
-        f"/v8/finance/chart/{symbol}",
-        {"range": range_, "interval": interval, "includePrePost": "false"},
-    )
+#: How many symbol fetches run at once. Yahoo has no documented per-second
+#: limit but does answer 429 under load, and `_get` already retries across the
+#: query1/query2 mirrors — so this is deliberately modest. Six turns a
+#: twenty-symbol dashboard load from twenty-odd serial round trips into four
+#: waves, which is the difference between a page that feels broken and one
+#: that does not.
+_MAX_PARALLEL = max(1, int(os.environ.get("SERIN_YAHOO_CONCURRENCY", "6")))
+
+
+def _in_parallel(items: list, work) -> list:
+    """``[(item, work(item))]`` with bounded concurrency, input order kept.
+
+    Each call is an independent `httpx.get`, so there is no shared client to
+    make this unsafe. `work` must not raise — every caller here returns a
+    ``(result, error)`` pair instead, so one bad symbol cannot take down the
+    batch.
+    """
+    if len(items) <= 1:
+        return [(item, work(item)) for item in items]
+    with ThreadPoolExecutor(max_workers=min(_MAX_PARALLEL, len(items))) as pool:
+        return list(zip(items, pool.map(work, items), strict=True))
+
+
+def _chart(
+    symbol: str, range_: str, interval: str = "1d", events: str = ""
+) -> tuple[dict | None, str | None]:
+    params = {"range": range_, "interval": interval, "includePrePost": "false"}
+    if events:
+        params["events"] = events
+    payload, error = _get(f"/v8/finance/chart/{symbol}", params)
     if error:
         return None, error
     try:
@@ -134,7 +162,7 @@ def _chart(symbol: str, range_: str, interval: str = "1d") -> tuple[dict | None,
             return None, "no chart data"
         return result[0], None
     except Exception as exc:
-        return None, f"Yahoo parse failed: {exc!r}"
+        return None, redact(f"Yahoo parse failed: {exc!r}")
 
 
 # --- fundamentals (quoteSummary) ---------------------------------------------
@@ -185,6 +213,68 @@ def _get_crumb(force: bool = False) -> tuple[Any | None, str | None]:
         if attempt < _MAX_ATTEMPTS - 1:
             _sleep(_BACKOFF_BASE_SECONDS * (attempt + 1))
     return None, None
+
+
+#: Symbols per batch request. Yahoo truncates a very long symbol list rather
+#: than erroring, so this stays well under where that starts.
+_BATCH_SIZE = 50
+
+
+def _batch_quotes(by_symbol: dict[str, Position]) -> dict[str, tuple[float, str]]:
+    """Prices for as many symbols as one v7/quote call will return.
+
+    Best-effort by design: anything this does not answer for falls back to the
+    per-symbol chart path, so a Yahoo change here costs latency rather than
+    prices. That matters more than usual — v7/quote needs the same cookie and
+    crumb as quoteSummary, and Yahoo has broken its auth before.
+    """
+    try:
+        import httpx
+    except Exception:
+        return {}
+
+    wanted = {
+        _symbol(symbol, position.asset_type): symbol
+        for symbol, position in by_symbol.items()
+    }
+    found: dict[str, tuple[float, str]] = {}
+    ordered = sorted(wanted)
+
+    for start in range(0, len(ordered), _BATCH_SIZE):
+        chunk = ordered[start:start + _BATCH_SIZE]
+        for attempt in (0, 1):
+            cookies, crumb = _get_crumb(force=attempt > 0)
+            if not crumb:
+                return found
+            try:
+                response = httpx.get(
+                    f"{_HOSTS[attempt % len(_HOSTS)]}/v7/finance/quote",
+                    params={"symbols": ",".join(chunk), "crumb": crumb},
+                    headers=_HEADERS,
+                    cookies=cookies,
+                    timeout=20,
+                    follow_redirects=True,
+                )
+                if response.status_code in (401, 403):
+                    continue        # stale crumb — refresh and retry once
+                response.raise_for_status()
+                rows = ((response.json() or {}).get("quoteResponse") or {}).get("result") or []
+            except Exception:
+                break               # fall through to the per-symbol path
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ours = wanted.get(str(row.get("symbol") or ""))
+                if not ours:
+                    continue
+                price = _safe_float(row.get("regularMarketPrice"))
+                if price <= 0:
+                    price = _safe_float(row.get("previousClose"))
+                if price > 0:
+                    found[ours] = (price, "")
+            break
+
+    return found
 
 
 def _quote_summary(symbol: str) -> dict | None:
@@ -282,9 +372,25 @@ class YahooProvider:
         for position in positions:
             by_symbol.setdefault(position.symbol, position)
 
-        for symbol, position in sorted(by_symbol.items()):
-            lookup = _symbol(symbol, position.asset_type)
-            result, error = _chart(lookup, "5d", "1d")
+        # One request for the whole book where Yahoo allows it. The chart
+        # endpoint below is per symbol, so a 31-holding deployment spent 31
+        # requests every sweep — which is what made a one-minute cadence cost
+        # 12,000 requests a day and kept the sweep at fifteen. Batched, a
+        # once-a-minute sweep costs fewer requests per day than the
+        # fifteen-minute one did.
+        batched = _batch_quotes(by_symbol)
+        prices.update(batched)
+        remaining = {s: p for s, p in by_symbol.items() if s not in batched}
+        if not remaining:
+            return {"prices": prices, "errors": errors}
+
+        def _quote(entry: tuple[str, Position]):
+            symbol, position = entry
+            return _chart(_symbol(symbol, position.asset_type), "5d", "1d")
+
+        for (symbol, _position), (result, error) in _in_parallel(
+            sorted(remaining.items()), _quote
+        ):
             if error or not result:
                 errors.append(f"{symbol}: {error or 'no chart'}")
                 continue
@@ -309,10 +415,12 @@ class YahooProvider:
         history: dict[str, dict[str, list]] = {}
         errors: list[str] = []
         range_ = _PERIOD_RANGE.get(period.lower(), "3mo")
-        for symbol in symbols:
+        def _series(symbol: str):
             position = positions_by_symbol.get(symbol)
-            lookup = _symbol(symbol, position.asset_type if position else "stock")
-            result, error = _chart(lookup, range_, "1d")
+            return _chart(_symbol(symbol, position.asset_type if position else "stock"),
+                          range_, "1d")
+
+        for symbol, (result, error) in _in_parallel(list(symbols), _series):
             if error or not result:
                 errors.append(f"{symbol}: {error or 'no chart'}")
                 continue
@@ -340,6 +448,41 @@ class YahooProvider:
                 "closes": [item[1] for item in ordered],
             }
         return {"history": history, "errors": errors}
+
+    def fetch_splits(self, symbols: list[str], positions_by_symbol: dict) -> dict:
+        """``{symbol: [(iso_date, ratio)]}`` — 10.0 for a ten-for-one.
+
+        Taken from the same endpoint as the prices, deliberately. The closes
+        are split-adjusted upstream, so the factors used to restate historical
+        trades have to be the ones that adjustment was made with; sourcing
+        them anywhere else invites a portfolio that disagrees with its own
+        chart. Splits are immutable history, so a stale answer here is only
+        ever a missing recent split, never a wrong old one.
+        """
+        splits: dict[str, list[tuple[str, float]]] = {}
+        errors: list[str] = []
+        for symbol in symbols:
+            position = positions_by_symbol.get(symbol)
+            asset_type = position.asset_type if position else "stock"
+            if asset_type in ("cash", "option", "crypto"):
+                continue
+            result, error = _chart(_symbol(symbol, asset_type), "10y", "1d", events="split")
+            if error or not result:
+                errors.append(f"{symbol}: {error or 'no chart'}")
+                continue
+            events = ((result.get("events") or {}).get("splits") or {}).values()
+            found: list[tuple[str, float]] = []
+            for event in events:
+                numerator = _safe_float(event.get("numerator"))
+                denominator = _safe_float(event.get("denominator"))
+                stamp = event.get("date")
+                if not stamp or numerator <= 0 or denominator <= 0:
+                    continue
+                day = datetime.fromtimestamp(int(stamp), tz=UTC).date().isoformat()
+                found.append((day, numerator / denominator))
+            if found:
+                splits[symbol] = sorted(found)
+        return {"splits": splits, "errors": errors}
 
     def fetch_fundamentals(self, symbol: str, asset_type: str = "stock") -> dict | None:
         if asset_type in ("crypto", "cash", "option"):

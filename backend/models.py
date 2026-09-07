@@ -67,7 +67,13 @@ class Position(PositionIn):
     unrealized_gain: float = 0.0
     unrealized_gain_pct: float = 0.0
     updated_at: str = Field(default_factory=utcnow_iso)
-    source: Literal["manual", "csv", "snaptrade"] = "manual"
+    # Deliberately not a Literal. Connectors are a plugin system — "adding a
+    # data source is a 40-line module and a PR" — so a closed set means every
+    # new connector makes Position unconstructible for anyone using it, and
+    # list_positions() raises rather than returning a portfolio. coinbase and
+    # binance are both default-enabled and both wrote values this Literal did
+    # not contain.
+    source: str = "manual"
 
 
 class TaxLotIn(BaseModel):
@@ -186,9 +192,55 @@ class BriefingPreferencesIn(BaseModel):
 
 # --- transactions ----------------------------------------------------------
 
+# The normalized ledger. "cash_in"/"cash_out" are the original spellings of
+# deposit/withdrawal and stay accepted forever — they are already written into
+# customers' databases — but new writers should use the explicit names.
+#
+# What each one means for performance is decided in one place, by the sets
+# below, rather than re-derived at each call site:
+#
+#   internal  — moves value between cash and securities inside the portfolio.
+#               Never a flow: buying does not make you richer or poorer.
+#   external  — money crossing the portfolio boundary. The only thing TWR
+#               must neutralise, and the only thing MWR treats as a cashflow.
+#   income    — adds to return without anyone contributing capital.
+#   cost      — subtracts from return.
 TransactionAction = Literal[
-    "buy", "sell", "dividend", "interest", "fee", "cash_in", "cash_out", "split", "transfer"
+    "buy", "sell",
+    "dividend", "interest",
+    "fee", "tax",
+    "deposit", "withdrawal", "cash_in", "cash_out",
+    "transfer",
+    "fx", "split", "adjustment",
 ]
+
+INTERNAL_ACTIONS = frozenset({"buy", "sell", "split", "fx"})
+EXTERNAL_ACTIONS = frozenset({"deposit", "withdrawal", "cash_in", "cash_out"})
+INCOME_ACTIONS = frozenset({"dividend", "interest"})
+COST_ACTIONS = frozenset({"fee", "tax"})
+# A transfer between two accounts Serin tracks nets to nothing, so it is
+# deliberately in none of the sets above: counting it as external would make
+# moving your own money look like a contribution on one side and a withdrawal
+# on the other, and total portfolio return would move for no reason.
+NEUTRAL_ACTIONS = frozenset({"transfer", "adjustment"})
+
+#: Older rows and older clients say cash_in/cash_out; normalise on read so the
+#: rest of the codebase only has to know one spelling.
+ACTION_ALIASES = {"cash_in": "deposit", "cash_out": "withdrawal"}
+
+
+def canonical_action(action: str) -> str:
+    return ACTION_ALIASES.get(action, action)
+
+
+def is_external_flow(action: str) -> bool:
+    """True when this row moved money across the portfolio boundary.
+
+    The single question TWR depends on. Getting it wrong in either direction
+    is the classic error: counting a buy makes trading look like saving, and
+    missing a deposit makes saving look like skill.
+    """
+    return canonical_action(action) in {"deposit", "withdrawal"}
 
 
 class TransactionIn(BaseModel):

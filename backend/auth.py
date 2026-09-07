@@ -41,6 +41,17 @@ PUBLIC_API_PREFIXES = (
     # before anything is cancelled — no data lives behind these paths.
     "/api/billing/cancel/",
     "/api/v1/billing/cancel/",
+    # The price relay carries its own secret and is useless without it, so the
+    # session gate has nothing to add here — and cannot help anyway: the relay
+    # is a machine with a token, not a person with a cookie, and the pack's
+    # authorizer only knows about people. Both paths refuse everything unless
+    # SERIN_PRICE_RELAY_TOKEN is set and matches, in constant time, answering
+    # 404 either way. "Public" here means the middleware steps aside, not that
+    # anything is readable.
+    "/api/prices/ingest",
+    "/api/v1/prices/ingest",
+    "/api/prices/tracked",
+    "/api/v1/prices/tracked",
 )
 
 
@@ -117,13 +128,65 @@ def is_public_path(path: str) -> bool:
     return any(path.startswith(prefix) or path == prefix.rstrip("/") for prefix in PUBLIC_API_PREFIXES)
 
 
+def bearer_value(headers) -> str:
+    """The raw bearer credential on a request, or empty string."""
+    authorization = headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return ""
+
+
+def agent_token_record(headers):
+    """The agent-token record behind this request's bearer, or None.
+
+    Only ever consulted for credentials carrying the agent-token prefix, so a
+    session bearer never pays for a settings read, and an agent token is never
+    mistaken for a session (they cannot collide — one is a 64-char hex digest,
+    the other is prefixed and base64url).
+    """
+    from backend import agent_tokens
+
+    candidate = bearer_value(headers)
+    if not candidate.startswith(agent_tokens.TOKEN_PREFIX):
+        return None
+    return agent_tokens.verify(candidate)
+
+
 def request_is_authorized(headers, cookies) -> bool:
-    """Check a request's Authorization header or session cookie."""
+    """Check a request's Authorization header or session cookie.
+
+    Agent tokens are checked before the pack authorizer is consulted, because
+    the authorizer only understands people and would reject one out of hand.
+    They are refused outright on a multi-user deployment — the check lives in
+    ``agent_tokens.verify`` — so this cannot become a way past identity.
+    """
+    if agent_token_record(headers) is not None:
+        return True
     if _authorizer is not None:
         return bool(_authorizer(headers, cookies))
     if not auth_enabled():
         return True
-    authorization = headers.get("authorization") or ""
-    if authorization.lower().startswith("bearer ") and verify_token(authorization[7:].strip()):
+    if verify_token(bearer_value(headers)):
         return True
     return verify_token(cookies.get(COOKIE_NAME, ""))
+
+
+def agent_denial(method: str, path: str, headers) -> str | None:
+    """An agent token's objection to this request, or None.
+
+    Separate from :func:`request_denial` because the answers differ in kind:
+    the pack's gate says "not right now" (402, subscription), this says "not
+    with this credential, ever" (403, scope). Returns None for every request
+    that is not carrying an agent token, including on an unlocked instance.
+    """
+    record = agent_token_record(headers)
+    if record is None:
+        return None
+    from backend import agent_tokens
+
+    if agent_tokens.scope_allows(record, method, path):
+        return None
+    return (
+        f"This agent token is scoped to {record.get('scope', 'read')} access on "
+        "/api/agent. Use a session for the rest of the API."
+    )

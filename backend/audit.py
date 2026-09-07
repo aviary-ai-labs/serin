@@ -62,6 +62,11 @@ def _tax_lots_by_position(lots: list[TaxLot]) -> dict[tuple[str, str], list[TaxL
     return grouped
 
 
+#: Position sources that come from a brokerage connection rather than a human.
+#: A row carrying one of these was last confirmed by the broker itself.
+_SYNCED_SOURCES = frozenset({"snaptrade", "coinbase"})
+
+
 def audit_portfolio() -> dict[str, Any]:
     """Run deterministic portfolio data checks.
 
@@ -162,6 +167,112 @@ def audit_portfolio() -> dict[str, Any]:
                         "lot_count": len(matching_lots),
                     },
                 ))
+
+    # A holding the brokerage does not report. Sync only removes rows it wrote
+    # itself — deleting somebody's hand-entered data because a vendor did not
+    # mention it would be far worse — so a position typed in or imported before
+    # the broker was connected survives the sale that closed it, and quietly
+    # keeps counting toward net worth.
+    #
+    # A broker is treated as covered when it has at least one synced position:
+    # that is local, needs no network call, and is exactly the evidence that
+    # the connection is live and reporting for that broker.
+    synced_brokers = {
+        position.broker for position in positions if position.source in _SYNCED_SOURCES
+    }
+    for position in positions:
+        if (
+            position.asset_type != "cash"
+            and position.source not in _SYNCED_SOURCES
+            and position.broker in synced_brokers
+        ):
+            issues.append(_issue(
+                code="unconfirmed_by_broker",
+                severity="critical",
+                category="reconciliation",
+                title=f"{position.symbol} is not in your {position.broker} account",
+                description=(
+                    f"This holding was entered by hand or imported, and the connected "
+                    f"{position.broker} account does not report it. If it was sold, its "
+                    f"{position.market_value:,.2f} is still counting toward your total."
+                ),
+                suggested_action=(
+                    "Check the position against your broker. If it is closed, delete it — "
+                    "the sale is already in your transactions if you imported a statement."
+                ),
+                position=position,
+                evidence={
+                    "source": position.source,
+                    "quantity": position.quantity,
+                    "market_value": round(position.market_value, 2),
+                    "broker_is_synced": True,
+                },
+            ))
+
+    # A quantity the broker disagreed with. Positions are unique on
+    # (symbol, broker, asset_type), so the sync overwrote the figure and there
+    # is no second row left to compare — the sync records what it replaced on
+    # its way past, and this is where that surfaces.
+    for conflict in db.sync_conflicts():
+        entered = float(conflict.get("entered_quantity") or 0)
+        synced = float(conflict.get("synced_quantity") or 0)
+        issues.append(_issue(
+            code="quantity_overwritten_by_sync",
+            severity="warning",
+            category="reconciliation",
+            title=f"{conflict.get('symbol', '?')} quantity disagreed with your broker",
+            description=(
+                f"You had {entered:,.4f} shares recorded; the connected "
+                f"{conflict.get('broker', 'broker')} account reported {synced:,.4f}. "
+                "The broker's figure is now in place."
+            ),
+            suggested_action=(
+                "If the broker is right, nothing to do. If you were tracking a "
+                "holding it does not cover, re-enter it under a different broker "
+                "so the sync stops overwriting it."
+            ),
+            evidence={
+                "symbol": conflict.get("symbol", ""),
+                "broker": conflict.get("broker", ""),
+                "entered_quantity": entered,
+                "entered_source": conflict.get("entered_source", ""),
+                "synced_quantity": synced,
+                "difference": round(synced - entered, 8),
+            },
+        ))
+
+    # The same purchase recorded twice — typed in once and imported once, or
+    # imported from two overlapping statements. Tax lots carry no uniqueness
+    # constraint by design (buying the same stock twice on one day is
+    # ordinary), so nothing stops a genuine double-entry either.
+    lots_by_purchase: dict[tuple[str, str, str], list[TaxLot]] = defaultdict(list)
+    for lot in lots:
+        lots_by_purchase[(lot.symbol, lot.broker, (lot.acquired_at or "")[:10])].append(lot)
+    for (symbol, broker, acquired), same_day in lots_by_purchase.items():
+        if len(same_day) < 2 or not acquired:
+            continue
+        quantities = [round(lot.quantity, 6) for lot in same_day]
+        # Two fills of different sizes on one day are two real purchases.
+        # Identical size and identical cost is what a double-entry looks like.
+        costs = [round(lot.cost_basis, 2) for lot in same_day]
+        if len(set(zip(quantities, costs, strict=True))) == len(same_day):
+            continue
+        issues.append(_issue(
+            code="duplicate_tax_lot",
+            severity="warning",
+            category="reconciliation",
+            title=f"{symbol} has the same purchase recorded more than once",
+            description=(
+                f"{len(same_day)} lots of {symbol} at {broker} share the purchase date "
+                f"{acquired} with matching quantity and cost. One purchase entered twice "
+                "overstates the position and its cost basis."
+            ),
+            suggested_action="Compare against your broker and delete the duplicate lot.",
+            evidence={
+                "symbol": symbol, "broker": broker, "acquired_at": acquired,
+                "lot_count": len(same_day), "quantities": quantities, "cost_basis": costs,
+            },
+        ))
 
     symbol_brokers: dict[tuple[str, str], set[str]] = defaultdict(set)
     for position in positions:

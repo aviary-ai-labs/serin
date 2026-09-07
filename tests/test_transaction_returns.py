@@ -98,10 +98,68 @@ def test_period_returns_payload_includes_accurate_block(tmp_path, monkeypatch):
     monkeypatch.setattr(
         analytics,
         "fetch_price_history",
-        lambda period="1y": {"history": {"AAA": {"dates": [d0, d1], "closes": [100.0, 110.0]}}},
+        lambda period="1y", **_: {"history": {"AAA": {"dates": [d0, d1],
+                                                       "closes": [100.0, 110.0]}}},
     )
 
     payload = analytics.period_returns()
 
     assert payload["accurate"]["available"] is True
     assert payload["accurate"]["twr_pct"] == pytest.approx(10.0, abs=1e-6)
+
+
+# --- a holding this window cannot value is outside it entirely -------------
+
+
+def test_a_sold_out_holding_does_not_manufacture_a_return(tmp_path):
+    """The bug. A position closed inside the window has no row in
+    db.list_positions(), so it went unpriced: its buys counted as
+    contributions while it contributed no value, and its sale counted as
+    proceeds while removing none. $494,430 of gross flow ran through twelve
+    such symbols and carried the reported TWR to +372.63%."""
+    _fresh(tmp_path)
+    d0, d1, d2 = _days_ago(3), _days_ago(2), _days_ago(1)
+    db.create_position(PositionIn(symbol="AAA", broker="manual", asset_type="stock",
+                                  quantity=1, average_cost=100, current_price=100))
+    db.create_transaction(TransactionIn(symbol="AAA", action="buy", quantity=1,
+                                        price=100, occurred_at=d0))
+    # Bought and sold inside the window at no gain, and not held at the end,
+    # so it never appears in positions and never gets a price series.
+    db.create_transaction(TransactionIn(symbol="ZZZ", action="buy", quantity=100,
+                                        price=50, occurred_at=d0))
+    db.create_transaction(TransactionIn(symbol="ZZZ", action="sell", quantity=100,
+                                        price=50, occurred_at=d1))
+
+    history = {"AAA": {"dates": [d0, d1, d2], "closes": [100.0, 100.0, 100.0]}}
+    result = analytics.transaction_returns(history=history)
+    assert result["available"] is True
+    # A flat holding cannot have earned anything, whatever else round-tripped.
+    assert result["twr_pct"] == pytest.approx(0.0, abs=1e-6), result["twr_pct"]
+
+
+def test_an_option_trade_stays_outside_the_sleeve(tmp_path):
+    """No close series exists for a contract, so counting its cash while never
+    valuing it would make buying one read as a loss."""
+    _fresh(tmp_path)
+    d0, d1 = _days_ago(2), _days_ago(1)
+    db.create_position(PositionIn(symbol="AAA", broker="manual", asset_type="stock",
+                                  quantity=1, average_cost=100, current_price=100))
+    db.create_transaction(TransactionIn(symbol="AAA", action="buy", quantity=1,
+                                        price=100, occurred_at=d0))
+    db.create_transaction(TransactionIn(symbol="MSFT", asset_type="option",
+                                        action="buy", quantity=10, price=21.70,
+                                        occurred_at=d1))
+    history = {"AAA": {"dates": [d0, d1], "closes": [100.0, 100.0]}}
+    assert analytics.transaction_returns(history=history)["twr_pct"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_priced_holding_still_reports_its_real_return(tmp_path):
+    """The guard against the fix becoming "ignore everything"."""
+    _fresh(tmp_path)
+    d0, d1 = _days_ago(2), _days_ago(1)
+    db.create_position(PositionIn(symbol="AAA", broker="manual", asset_type="stock",
+                                  quantity=1, average_cost=100, current_price=110))
+    db.create_transaction(TransactionIn(symbol="AAA", action="buy", quantity=1,
+                                        price=100, occurred_at=d0))
+    history = {"AAA": {"dates": [d0, d1], "closes": [100.0, 110.0]}}
+    assert analytics.transaction_returns(history=history)["twr_pct"] == pytest.approx(10.0, abs=1e-6)

@@ -13,7 +13,7 @@ connector's manifest.
 
 Out of the box it's a full portfolio tracker (positions, transactions,
 multi-currency, real time-weighted and money-weighted returns, stock charts,
-tax lots, AI briefings, a companion mobile app) that works **free with no API
+tax lots, AI briefings) that works **free with no API
 key** (Yahoo Finance). Serin provides context and organization, not investment
 advice.
 
@@ -59,6 +59,13 @@ in writing in [docs/BUSINESS-MODEL.md](docs/BUSINESS-MODEL.md):
   template; AI extracts positions for mandatory human review before anything
   is committed. Works with Anthropic or DeepSeek keys configured in the
   portal.
+- **Ask your own AI** — Serin is an [MCP](#ask-your-own-ai-mcp) server. Point
+  Claude Desktop, Claude Code, or anything that speaks MCP at your portfolio
+  and ask it questions. Eight read-only tools return *computed* answers (real
+  TWR/XIRR, FIFO-matched realised gains, tax lots) rather than rows for the
+  model to add up. Your data never leaves your server, and inference runs on
+  whatever subscription you already have — Serin charges nothing for it. The
+  same tools are plain HTTP under `/api/agent`, published in `/openapi.json`.
 - **Briefings** — one-click AI daily briefing: portfolio context, market
   context, watch items, risk flags, and questions to review. History includes
   the model, runtime, and estimated cost. Context and organization only —
@@ -70,15 +77,16 @@ in writing in [docs/BUSINESS-MODEL.md](docs/BUSINESS-MODEL.md):
   (Robinhood, E*Trade, Schwab, Fidelity, and more); holdings, cash, and
   transaction history sync and reconcile automatically. Serin can never place
   trades, and you can disconnect anytime.
-- **Mobile app** — an Expo (iOS/Android) companion in [`mobile/`](mobile/)
-  with portfolio, charts, briefings, camera Smart Import, offline snapshot,
-  QR pairing, biometric lock, and push notifications. See
-  [docs/MOBILE-RELEASE.md](docs/MOBILE-RELEASE.md).
+- **Web app, everywhere** — the interface is responsive and works in a phone
+  browser. There is a native iOS/Android app, but it signs in to Serin Cloud
+  and is developed outside this repo; a self-hosted instance is used through
+  the browser. (Versions of that app published here previously remain AGPL and
+  forkable — see [git history](../../commits/main/mobile).)
 - **Your data, portable** — one-click full backup (SQLite snapshot), positions
   CSV export, and restore, from the Connectors → Data panel.
 - **App lock** — optional password gate (`SERIN_AUTH_PASSWORD`) for instances
-  exposed beyond localhost, with session cookies and Bearer tokens for the
-  mobile app.
+  exposed beyond localhost, with session cookies for the browser and Bearer
+  tokens for API clients.
 
 ## Quickstart with Docker
 
@@ -132,6 +140,59 @@ runs it at roughly 1/20th the cost of Claude Sonnet.
 For local development with your Claude subscription, run `claude setup-token`
 and set `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
 
+## Ask your own AI (MCP)
+
+Serin exposes its portfolio as read-only tools an AI agent can call. Nothing
+about this is metered or paid: it runs against your own instance, and the model
+is whichever one you already pay for.
+
+**1. Create a token** — Connectors → Agent access → *Create token*. It is shown
+once and stored only as a hash. Tokens are scoped to `/api/agent`: one cannot
+change a position, download a backup, or create another token.
+
+**2a. Remote MCP (nothing to install)** — if your client supports remote MCP
+servers, point it at `https://your-serin/api/agent/mcp` with the token as a
+bearer credential. One endpoint, streamable HTTP, stateless.
+
+**2b. Or run the local bridge** — for clients that only launch a command:
+
+```json
+{
+  "mcpServers": {
+    "serin": {
+      "command": "python",
+      "args": ["-m", "backend.mcp_server"],
+      "env": {
+        "SERIN_URL": "http://127.0.0.1:8890",
+        "SERIN_AGENT_TOKEN": "serin_at_..."
+      }
+    }
+  }
+}
+```
+
+The MCP server is a thin client — it forwards to `SERIN_URL` over HTTP, so it
+works whether Serin runs on the same machine, in Docker, or behind a proxy.
+
+**The tools:** `get_portfolio_summary`, `get_performance`, `list_positions`,
+`get_position`, `get_realized_gains`, `list_transactions`, `get_price_history`,
+`find_data_gaps`. Every one that reads prices reports how fresh they are, so an
+agent can tell a stale quote from a current one.
+
+**Not using MCP?** The same registry is served over plain HTTP:
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /api/agent/tools` | Every tool with its JSON schema |
+| `POST /api/agent/tools/{name}` | Run one; arguments are the JSON body |
+| `GET /api/agent/context.md` | The whole portfolio as Markdown — for agents with no tool support, or to paste into any chat |
+| `POST /api/agent/mcp` | MCP over HTTP — one JSON-RPC message per request |
+
+**On a shared deployment**, a token names the account that issued it
+(`serin_at_<account>.<secret>`) and every request runs bound to that account.
+The owner half is not a secret — swapping it for someone else's looks up their
+stored hashes, which will not match, so a token cannot be retargeted.
+
 ## Scheduled briefings
 
 Turn on the schedule in the Briefings tab (time + timezone). Implementation
@@ -154,6 +215,13 @@ Add your `client_id` and `consumer_key` in **Connectors → SnapTrade** (free
 for one connected user at [snaptrade.com](https://snaptrade.com/)) — or set
 `SNAPTRADE_CLIENT_ID` / `SNAPTRADE_CONSUMER_KEY` in `.env`. A **Brokerage
 Sync** card appears in the Overview sidebar:
+
+> **On SnapTrade's free tier**, also set `SNAPTRADE_USER_ID` and
+> `SNAPTRADE_USER_SECRET`. A personal key arrives with one SnapTrade user
+> already created and refuses to create more, so Serin needs to be told which
+> user it got — both values are in your SnapTrade dashboard. Without them the
+> first connection attempt fails with "registerUser is not available for
+> personal keys". Partner keys create a user per account and need neither.
 
 - **Connect a brokerage** opens SnapTrade's hosted Connection Portal in a new
   tab. Serin only ever requests **read-only** access (`connection_type=read`)
@@ -231,6 +299,15 @@ ruff check backend tests
 npm run build
 pytest
 ```
+
+## Feedback
+
+Serin is at 0.9 and shaped mostly by what people report, so this is a real
+request rather than a footer link. Bugs and anything that behaves oddly go in
+[Issues](https://github.com/aviary-ai-labs/serin/issues); questions, setup
+trouble, and "I wish it did X" go in
+[Discussions](https://github.com/aviary-ai-labs/serin/discussions). Telling me
+which broker or which import tripped it up usually saves a round trip.
 
 ## Contributing & license
 

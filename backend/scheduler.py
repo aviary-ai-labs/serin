@@ -31,11 +31,30 @@ from backend.models import Briefing
 
 logger = logging.getLogger(__name__)
 
-CHECK_INTERVAL_SECONDS = 30
+# Every job below gates itself on its own clock — the quote sweep on
+# QUOTE_SWEEP_SECONDS, the history sweep and the connector syncs on the day,
+# `decide()` on the schedule — so this interval is the floor on how often any
+# of them can fire. It was raised to five minutes when the loop woke 2,880
+# times a day to find nothing due 2,879 of them, each pass re-reading the
+# schedule and a couple of dozen settings per user.
+#
+# The floor on every gated job: a sweep asking for 60s inside a loop that
+# wakes every 300s would run every five minutes, so the loop has to wake at
+# least as often as the fastest cadence any provider can afford. The per-pass
+# cost that made 30s expensive is unchanged, and every job still gates itself,
+# so most passes do nothing but check a clock.
+CHECK_INTERVAL_SECONDS = 60
 # How often the deployment-wide quote sweep runs. Matches the freshness window
 # a user-triggered refresh honours, so the cache is normally warm enough that
 # nobody's refresh reaches a provider at all.
-QUOTE_SWEEP_SECONDS = 900
+#
+# The cadence is a fact about the provider's budget, not a preference, so it
+# is asked of the providers rather than fixed here — see
+# backend.prices.sweep_interval_seconds. A daily allowance affords five
+# minutes; a per-minute one affords a minute.
+#
+# This constant is only the floor the scheduler loop can honour, and the value
+# the sweep gate falls back to when the registry cannot be read.
 MAX_ATTEMPTS_PER_DAY = 3
 RETRY_DELAY = timedelta(minutes=10)
 
@@ -254,16 +273,16 @@ async def maybe_email_briefing(briefing_id: int) -> None:
     Email failures are logged, never raised — the briefing itself succeeded
     and stays available in the app.
     """
+    from backend import emailer
+
     schedule = db.get_schedule()
-    if not schedule.get("email_enabled") or not settings.email_configured:
+    if not schedule.get("email_enabled") or not emailer.email_ready():
         return
     briefing = db.get_briefing(briefing_id)
     if not briefing or briefing.status != "done":
         return
     try:
-        from backend import emailer
-
-        recipient = await asyncio.to_thread(emailer.send_briefing_email, briefing)
+        recipient = await asyncio.to_thread(emailer.deliver_scheduled_briefing_email, briefing)
         db.mark_briefing_emailed(briefing.id)
         logger.info("Emailed scheduled briefing %s to %s", briefing.id, recipient)
     except Exception:
@@ -291,8 +310,12 @@ async def maybe_refresh_tracked_quotes() -> None:
     proportional to symbols rather than to customers. Never raises.
     """
     global _last_quote_sweep
+    from backend.prices import sweep_interval_seconds
+
     now = datetime.now(UTC)
-    if _last_quote_sweep and (now - _last_quote_sweep).total_seconds() < QUOTE_SWEEP_SECONDS:
+    with scope.using(scope.INSTANCE_SCOPE):
+        interval = sweep_interval_seconds()
+    if _last_quote_sweep and (now - _last_quote_sweep).total_seconds() < interval:
         return
     _last_quote_sweep = now
     try:
@@ -304,6 +327,39 @@ async def maybe_refresh_tracked_quotes() -> None:
             logger.warning("Quote sweep finished with errors: %s", result["errors"][:3])
     except Exception:
         logger.warning("Shared quote sweep failed; users fall back to their own fetches", exc_info=True)
+
+
+_last_price_sync: dict[str, datetime] = {}
+# One decade: passed as refresh_prices' freshness window so ANY cached price
+# counts as fresh — the sync must serve rows from the cache, never spend the
+# provider budget the market-hours-gated sweep exists to protect. Symbols the
+# cache has never seen at all still fetch once, then join the sweep.
+_ANY_CACHE_AGE_SECONDS = 10 * 365 * 24 * 3600
+
+
+async def maybe_sync_position_prices(owner: str) -> None:
+    """Keep one user's position prices tracking the shared quote cache.
+
+    The sweep keeps the CACHE current, but nothing wrote those prices back
+    onto position rows unless the user pressed Refresh — a Smart-Imported
+    portfolio displayed its document's prices indefinitely. Runs per user at
+    the sweep's own cadence, from cache only. Never raises.
+    """
+    now = datetime.now(UTC)
+    last = _last_price_sync.get(owner)
+    from backend.prices import sweep_interval_seconds
+
+    with scope.using(scope.INSTANCE_SCOPE):
+        interval = sweep_interval_seconds()
+    if last and (now - last).total_seconds() < interval:
+        return
+    _last_price_sync[owner] = now
+    try:
+        from backend.prices import refresh_prices
+
+        await asyncio.to_thread(refresh_prices, None, _ANY_CACHE_AGE_SECONDS)
+    except Exception:
+        logger.warning("Position price sync failed; rows keep their last price", exc_info=True)
 
 
 _last_history_sweep_day: str | None = None
@@ -345,18 +401,31 @@ async def scheduler_loop() -> None:
     while True:
         await maybe_refresh_tracked_quotes()
         await maybe_refresh_tracked_history()
+        # Listed once and shared by both passes. On Cloud the lister is a
+        # database round trip that also sweeps lapsed trials, so asking twice
+        # a tick bought nothing but load — and both passes now agree on who
+        # exists, rather than an account signing up between them being visible
+        # to one and not the other. If listing fails there is nobody to act
+        # for, which is what each pass concluded separately before; the tick
+        # is skipped rather than the loop dying.
+        try:
+            owners = scope.all_scopes()
+        except Exception:
+            logger.exception("Could not list scopes; skipping this pass")
+            owners = []
         try:
             # Briefings are per-user: one schedule and one portfolio each. On
             # self-host this is a single pass; with accounts it visits everyone.
-            for owner in scope.all_scopes():
+            for owner in owners:
                 with scope.using(owner):
+                    await maybe_sync_position_prices(owner)
                     await check_once()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Briefing scheduler check failed")
         try:
-            for owner in scope.all_scopes():
+            for owner in owners:
                 with scope.using(owner):
                     await maybe_auto_sync_connectors()
         except asyncio.CancelledError:

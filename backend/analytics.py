@@ -44,6 +44,12 @@ def _today_utc() -> date:
     return datetime.now(UTC).date()
 
 
+#: A holding below this share of the basket is not worth delaying the whole
+#: series for. Matches backend.portfolio_history, which trims for the same
+#: reason at the other end of the reconstruction.
+_MATERIAL_SHARE = 0.01
+
+
 def _nav_series(positions: list[Position], history: dict[str, dict]) -> list[tuple[str, float]]:
     """Reconstruct a daily NAV series from today's basket × historical closes.
 
@@ -58,7 +64,7 @@ def _nav_series(positions: list[Position], history: dict[str, dict]) -> list[tup
     )
 
     flat_value = 0.0  # positions with no history → carried flat at market value
-    by_date: dict[str, float] = {}
+    tracked: list[tuple[float, dict[str, float]]] = []  # (quantity, {date: close})
 
     for position in positions:
         if position.asset_type in ("cash", "option"):
@@ -67,15 +73,57 @@ def _nav_series(positions: list[Position], history: dict[str, dict]) -> list[tup
         if not series or not series.get("dates") or not series.get("closes"):
             flat_value += position.market_value
             continue
-        multiplier = position.quantity  # for stocks/etf/crypto
-        for day, close in zip(series["dates"], series["closes"], strict=False):
-            by_date[day] = by_date.get(day, 0.0) + multiplier * float(close)
+        closes = {
+            day: float(close)
+            for day, close in zip(series["dates"], series["closes"], strict=False)
+        }
+        tracked.append((position.quantity, closes))
 
-    if not by_date:
+    if not tracked:
         return []
 
-    days = sorted(by_date)
-    return [(day, by_date[day] + cash_value + flat_value) for day in days]
+    # A symbol missing a date means "no close reported yet", never "sold" —
+    # free providers finalize some symbols a day late, so tails are routinely
+    # ragged. Carry each symbol's last close forward, and start the series
+    # only once every symbol has reported: summing whatever happened to be
+    # present used to end the NAV series with a cliff the size of the missing
+    # holdings, which every period return then measured against. (The trend
+    # chart in Charts.jsx carries the identical fix.)
+    # Waiting for *every* symbol is too strict at the head of the series. A
+    # holding that listed part-way through the window has no closes before it
+    # existed, so demanding one pushed the series start forward to its listing
+    # date: SPCX listed 2026-06-12 and worth a few hundred dollars blanked
+    # both YTD and 1Y, and left MAX measuring three months.
+    #
+    # So wait only for holdings big enough to distort the total, and carry a
+    # small one at its earliest known close until it reports. One percent of
+    # the basket bounds the error by construction, and a bounded error beats a
+    # missing number.
+    weights = [quantity * (closes[max(closes)] if closes else 0.0)
+               for quantity, closes in tracked]
+    basket = sum(abs(weight) for weight in weights)
+    material = {idx for idx, weight in enumerate(weights)
+                if basket <= 0 or abs(weight) >= basket * _MATERIAL_SHARE}
+
+    # Each symbol's first close, used to carry an immaterial holding flat
+    # before it listed rather than treating it as worth nothing.
+    earliest = [closes[min(closes)] if closes else 0.0 for _, closes in tracked]
+
+    days = sorted({day for _, closes in tracked for day in closes})
+    seen: dict[int, float] = {}
+    series_out: list[tuple[str, float]] = []
+    for day in days:
+        for idx, (_, closes) in enumerate(tracked):
+            if day in closes:
+                seen[idx] = closes[day]
+        if any(idx not in seen for idx in material):
+            continue
+        total = sum(
+            quantity * seen.get(idx, earliest[idx])
+            for idx, (quantity, _) in enumerate(tracked)
+        )
+        series_out.append((day, total + cash_value + flat_value))
+    return series_out
 
 
 def _period_bounds(today: date) -> dict[str, date]:
@@ -119,6 +167,7 @@ def _today_change(positions: list[Position]) -> tuple[float, float]:
     # most recent two history bars at the symbol level.
     history_payload = fetch_price_history(period="1w")
     histories = history_payload.get("history", {})
+    today_iso = _today_utc().isoformat()
     for p in positions:
         if p.asset_type in ("cash", "option"):
             previous += p.market_value  # treated flat
@@ -126,10 +175,21 @@ def _today_change(positions: list[Position]) -> tuple[float, float]:
             continue
         series = histories.get(p.symbol) or {}
         closes = series.get("closes") or []
-        if len(closes) < 2:
+        dates = series.get("dates") or []
+        if not closes:
             previous += p.market_value
             continue
-        prev_close = float(closes[-2])
+        # The newest bar only becomes "today" after today's close lands; until
+        # then closes[-1] IS the previous close. Reaching for closes[-2]
+        # unconditionally measured the day against the day-before-yesterday
+        # for the whole session, overstating every move.
+        if dates and str(dates[-1])[:10] == today_iso:
+            if len(closes) < 2:
+                previous += p.market_value
+                continue
+            prev_close = float(closes[-2])
+        else:
+            prev_close = float(closes[-1])
         previous += prev_close * p.quantity
         have_any_prev = True
     if not have_any_prev or previous <= 0:
@@ -193,14 +253,27 @@ def transaction_returns(
     ``{"available": False}`` and callers fall back to the indicative numbers.
     """
     positions = positions if positions is not None else db.list_positions()
-    if history is None:
-        history = fetch_price_history(period="1y").get("history", {})
 
     transactions = sorted(
         db.list_transactions(limit=100_000),
         key=lambda t: t.occurred_at,
     )
+    # Options are outside this boundary: there is no close series for a
+    # contract, so counting their cash while never valuing them would make
+    # buying one read as a loss. backend.portfolio_history draws the same line.
+    transactions = [t for t in transactions if (t.asset_type or "") != "option"]
     trades = [t for t in transactions if t.action in ("buy", "sell") and t.symbol]
+
+    if history is None:
+        # Traded symbols too, not just held ones. A sold-out holding has no
+        # entry in db.list_positions(), so it went unpriced and contributed
+        # nothing to value while its buys and sales contributed their full
+        # cash — $494,430 of gross flow through twelve such symbols, every
+        # sale of them a gain out of nothing.
+        history = fetch_price_history(
+            period="1y",
+            extra_symbols=sorted({t.symbol.upper() for t in trades if t.symbol}),
+        ).get("history", {})
     if not trades:
         return {"available": False, "reason": "No buy/sell transactions recorded yet."}
 
@@ -252,11 +325,20 @@ def transaction_returns(
         return total
 
     # Per-day contributions (+into sleeve) and dividends (out of sleeve).
+    #
+    # Only for symbols this window can actually value. A mutual fund with no
+    # daily closes never enters `value_on`, so letting its purchases count as
+    # contributions asks the return to explain money that, as far as the
+    # valuation is concerned, went nowhere. Either both sides of a holding are
+    # in the sleeve or neither is.
+    priceable = {symbol for symbol, series in closes.items() if series}
     flows_by_day: dict[str, float] = {}
     mwr_flows_by_day: dict[str, float] = {}
     for t in transactions:
         day = t.occurred_at[:10]
         if day < days[0] or day > days[-1]:
+            continue
+        if t.symbol and t.symbol.upper() not in priceable:
             continue
         if t.action == "buy" and t.symbol:
             invested = t.quantity * t.price + t.fee
@@ -418,7 +500,10 @@ def period_returns(positions: list[Position] | None = None) -> dict:
 
     day_abs, day_pct = _today_change(positions)
 
-    accurate = transaction_returns(positions, history_payload.get("history", {}))
+    # Deliberately not handed history_payload: that one is fetched for today's
+    # basket, and the transaction-accurate figure needs the sold-out holdings
+    # too. It is cache-first, so asking again costs a lookup, not a request.
+    accurate = transaction_returns(positions)
 
     return {
         "today_change": day_abs,
@@ -442,7 +527,10 @@ def period_returns(positions: list[Position] | None = None) -> dict:
         "note": (
             "Period returns are indicative: they back-price today's basket on "
             "historical closes and don't reflect past deposits, sales, or weight "
-            "drift. Today's change uses your current snapshot."
+            "drift. Cash is included and carried flat, so a large cash balance "
+            "pulls these toward zero — the X-ray's benchmark excludes it and "
+            "will read higher for the same period. Today's change uses your "
+            "current snapshot."
         ),
     }
 

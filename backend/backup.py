@@ -88,6 +88,8 @@ def restore_data(payload: dict[str, Any]) -> dict[str, int]:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+    # A restore rewrites app_settings wholesale, behind set_setting's back.
+    db.forget_settings_cache()
     return counts
 
 

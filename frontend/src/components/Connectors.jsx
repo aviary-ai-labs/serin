@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import QRCode from 'qrcode';
 import { api } from '../api.js';
 import { MarkdownRenderer } from './Markdown.jsx';
 
@@ -34,7 +33,6 @@ export function ConnectorsView({ addToast, onChanged }) {
   const [busy, setBusy] = useState('');
   const [tests, setTests] = useState({}); // id -> {ok, message}
   const [docs, setDocs] = useState(null); // {id, name, markdown}
-  const [pairQr, setPairQr] = useState(null); // {dataUrl, authEnabled}
   const [plan, setPlan] = useState(null); // /api/entitlements — open-core seam
   const [license, setLicense] = useState(null); // /api/license — activation state
   const [licenseKey, setLicenseKey] = useState(''); // paste-box draft
@@ -93,19 +91,6 @@ export function ConnectorsView({ addToast, onChanged }) {
       addToast?.('success', 'License removed — back to open source.');
     } catch (error) {
       addToast?.('error', `License: ${error.message}`);
-    } finally {
-      setBusy('');
-    }
-  }
-
-  async function showPairingQr() {
-    setBusy('pair');
-    try {
-      const info = await api('/api/pairing');
-      const dataUrl = await QRCode.toDataURL(JSON.stringify(info), { width: 280, margin: 1 });
-      setPairQr({ dataUrl, authEnabled: info.auth_enabled });
-    } catch (error) {
-      addToast?.('error', `Pairing: ${error.message}`);
     } finally {
       setBusy('');
     }
@@ -435,21 +420,6 @@ export function ConnectorsView({ addToast, onChanged }) {
             </div>
           </div>
           <div className="dashcard">
-            <div className="dashmono">▣</div>
-            <div>
-              <div className="dashname">Pair mobile app</div>
-              <div className="dashdesc">
-                Scan from the Serin app (Settings → Scan pairing QR). Carries this server's URL
-                {` `}and — when the app lock is on — your session token.
-              </div>
-              <div className="data-panel-actions" style={{ marginTop: 10 }}>
-                <button className="btn btn-ghost btn-sm" disabled={busy === 'pair'} onClick={showPairingQr}>
-                  {busy === 'pair' ? 'Generating…' : 'Show pairing QR'}
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="dashcard">
             <div className="dashmono">⬆</div>
             <div>
               <div className="dashname">Restore</div>
@@ -490,23 +460,6 @@ export function ConnectorsView({ addToast, onChanged }) {
           </div>
         </div>
       </section>
-
-      {pairQr && (
-        <div className="modal-backdrop" onClick={() => setPairQr(null)}>
-          <div className="modal" style={{ maxWidth: 380, textAlign: 'center' }} onClick={event => event.stopPropagation()}>
-            <div className="modal-head">
-              <h2>Pair mobile app</h2>
-              <button className="btn btn-ghost btn-sm" onClick={() => setPairQr(null)}>Close</button>
-            </div>
-            <img src={pairQr.dataUrl} alt="Serin mobile pairing QR code" style={{ width: 260, height: 260, margin: '0 auto' }} />
-            <p className="schedule-hint" style={{ marginTop: 12 }}>
-              {pairQr.authEnabled
-                ? 'Contains your server URL and session token — treat it like a password.'
-                : 'Contains your server URL. Tip: set SERIN_AUTH_PASSWORD to add an app lock before exposing Serin beyond localhost.'}
-            </p>
-          </div>
-        </div>
-      )}
 
       {docs && (
         <div className="modal-backdrop" onClick={() => setDocs(null)}>

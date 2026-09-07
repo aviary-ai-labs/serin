@@ -84,6 +84,42 @@ class AlphaVantageConnector(MarketDataConnector):
         return TestResult(ok=True, message="Key present.")
 ```
 
+## Telling the sweep what a provider costs
+
+The deployment-wide price sweep decides how often it can run by arithmetic,
+not preference: how many requests a book costs against how many the plan
+allows. A `market_data` connector says so with `quote_budget`.
+
+```python
+from backend.connectors.base import QuoteBudget
+
+class AlphaVantageConnector(MarketDataConnector):
+    quote_budget = QuoteBudget(batch_size=1, per_day=25)
+```
+
+| field | meaning |
+|---|---|
+| `batch_size` | symbols per request. `1` unless the API takes a symbol list. |
+| `per_minute` | requests allowed per minute, or `None` if that is not the binding limit |
+| `per_day` | requests allowed per day, or `None` |
+
+The default declares nothing, so a connector that omits it never speeds the
+sweep up on the strength of an assumption — it simply does not vote.
+
+`batch_size` is the field that decides whether a provider scales. One symbol
+per request means a 500-symbol deployment costs 500 requests a sweep, which no
+per-minute ceiling survives; fifty per request makes the same book ten. A
+provider that batches carries five hundred symbols more cheaply than a
+one-at-a-time provider carries twenty.
+
+Be honest about the numbers, including when the limit is unpublished and had
+to be measured. Overstating them does not make the sweep faster — it makes it
+ask faster than the provider answers, and a rate-limited sweep prices nothing
+at all, which is worse than pricing slowly. Where a provider throttles rather
+than refusing outright, `refresh_prices` should also stop asking once it is
+clearly being turned away: limiters are usually buckets that refill with time,
+so continuing to ask keeps them empty.
+
 Then register it for discovery:
 
 ```python
@@ -128,7 +164,8 @@ patterns. Run `pytest -q`.
 | POST | `/api/connectors/{id}/enable` | `{enabled: bool}` |
 | POST | `/api/connectors/{id}/test` | run the health check |
 
-All are also served under `/api/v1/...` for the mobile/SDK client.
+All are also served under `/api/v1/...` — the versioned contract for
+non-browser clients.
 
 ## Connector reference
 

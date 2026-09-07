@@ -24,7 +24,7 @@ key). That volume **is** your Serin — back it up.
 
 | Var | Purpose | Recommendation |
 |---|---|---|
-| `SERIN_AUTH_PASSWORD` | App lock: passphrase for the web UI, bearer token for API/mobile | **Set it** for anything reachable beyond localhost |
+| `SERIN_AUTH_PASSWORD` | App lock: passphrase for the web UI, bearer token for API clients | **Set it** for anything reachable beyond localhost |
 | `SERIN_SECRET_KEY` | 32-byte base64/hex key for secrets-at-rest | Set it so the key never lives next to the DB; else `/data/.serin-key` is auto-generated |
 | `SERIN_LOG_FORMAT` | `json` for structured request logs | `json` behind a log collector |
 | `FMP_API_KEY`, `SNAPTRADE_*`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` | Providers | Optional — all configurable in the portal UI instead |
@@ -48,7 +48,8 @@ serin.example.com {
 - **Railway / Render** — deploy the Dockerfile; attach a persistent disk at
   `/data`; configure the env vars above in the dashboard.
 - **Umbrel / CasaOS / TrueNAS** — generic Docker app: image from this repo,
-  port 8890, volume `/data`. Pair the mobile app over your LAN or Tailscale.
+  port 8890, volume `/data`. Reach it from a phone browser over your LAN or
+  Tailscale.
 
 ## Backup & restore
 

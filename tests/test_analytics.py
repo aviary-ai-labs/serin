@@ -37,7 +37,8 @@ def _build_history(monkeypatch, history_payload):
     monkeypatch.setattr(
         analytics,
         "fetch_price_history",
-        lambda period="3m": {"period": period, "provider": "stub", "history": history_payload, "errors": []},
+        lambda period="3m", **_: {"period": period, "provider": "stub",
+                                  "history": history_payload, "errors": []},
     )
 
 
@@ -97,3 +98,57 @@ def test_period_bounds_includes_wtd_mtd_ytd():
     assert bounds["MTD"].day == 1
     assert bounds["YTD"].month == 1 and bounds["YTD"].day == 1
     assert bounds["1Y"].year == today.year - 1
+
+
+def test_nav_series_carries_ragged_tails_forward(monkeypatch):
+    """A symbol whose provider is a day behind must not fall out of the NAV —
+    the missing bar means "close not reported yet", never "sold". Without
+    carry-forward the last day cratered by the whole holding and every period
+    return measured against the cliff."""
+    positions = [_make_position("AAA", 10, 100.0), _make_position("LAG", 10, 50.0)]
+    series = analytics._nav_series(positions, {
+        "AAA": {"dates": ["2026-08-12", "2026-08-13", "2026-08-14"], "closes": [100, 101, 102]},
+        "LAG": {"dates": ["2026-08-12", "2026-08-13"], "closes": [50, 51]},
+    })
+    assert [day for day, _ in series] == ["2026-08-12", "2026-08-13", "2026-08-14"]
+    # 08-14: AAA at 102, LAG carried at its last close 51 — not dropped to 0.
+    assert series[-1][1] == 10 * 102 + 10 * 51
+
+
+def test_today_change_uses_last_close_when_no_bar_landed_today(monkeypatch):
+    """Until today's close lands, closes[-1] IS the previous close. Reaching
+    for closes[-2] unconditionally measured today against the
+    day-before-yesterday, overstating every move all session long."""
+    position = _make_position("AAA", 10, 102.0)  # live price 102
+    _build_history(monkeypatch, {
+        "AAA": {"dates": ["2026-08-13", "2026-08-14"], "closes": [99.0, 100.0]},
+    })
+    absolute, pct = analytics._today_change([position])
+    assert absolute == pytest.approx(10 * (102.0 - 100.0))
+    assert pct == pytest.approx((20.0 / 1000.0) * 100)
+
+
+def test_today_change_steps_back_one_bar_once_todays_close_lands(monkeypatch):
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    today = _dt.now(_UTC).date().isoformat()
+    position = _make_position("AAA", 10, 102.0)
+    _build_history(monkeypatch, {
+        "AAA": {"dates": ["2026-08-14", today], "closes": [100.0, 102.0]},
+    })
+    absolute, pct = analytics._today_change([position])
+    assert absolute == pytest.approx(10 * (102.0 - 100.0))
+    assert pct == pytest.approx(2.0)
+
+
+def test_the_indicative_note_names_the_cash_it_includes():
+    """Two screens reported the same year as +3.50% and +2.26%, and neither
+    said why: the X-ray benchmark measures the invested sleeve, these cards
+    measure the whole portfolio with cash carried flat. On a book that is a
+    third cash that is the entire gap, and an unexplained one reads as a bug."""
+    from backend import analytics
+
+    note = analytics.period_returns()["note"]
+    assert "cash is included" in note.lower()
+    assert "x-ray" in note.lower(), "the other figure is not named"

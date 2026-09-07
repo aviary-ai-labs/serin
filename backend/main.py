@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend import (
+    agent_api,
     analytics,
     audit,
     auth,
     backup,
+    broker_csv,
     db,
     emailer,
     fundamentals,
@@ -122,6 +126,11 @@ async def lifespan(_app: FastAPI):
             await scheduler_task
         except asyncio.CancelledError:
             pass
+        # Hand the database its connections back rather than leaving the
+        # server to time them out; a no-op on SQLite, which never pools.
+        from backend import dbdriver
+
+        dbdriver.close_pool()
 
 
 app = FastAPI(title="Serin", version=APP_VERSION, lifespan=lifespan)
@@ -140,11 +149,15 @@ app.add_middleware(
 
 @app.middleware("http")
 async def observability_and_auth(request, call_next):
-    """One middleware, two production duties.
+    """One middleware, three production duties.
 
     1. App lock: when SERIN_AUTH_PASSWORD is set, /api/* (minus the public
        allowlist) requires the bearer token or session cookie.
-    2. Request log: one line per API request — method, path, status, ms.
+    2. Agent-token scope: a credential from backend.agent_tokens authorizes
+       the request, but only for /api/agent. Anything else is 403 — a
+       different answer from the pack gate's 402, because scope is permanent
+       and a lapsed subscription is not.
+    3. Request log: one line per API request — method, path, status, ms.
        Static asset chatter is skipped. No bodies, no query strings with
        user data, no telemetry.
     """
@@ -156,6 +169,11 @@ async def observability_and_auth(request, call_next):
             from fastapi.responses import JSONResponse
 
             return JSONResponse({"detail": "Locked — sign in first."}, status_code=401)
+        scope_denial = auth.agent_denial(request.method, request.url.path, request.headers)
+        if scope_denial:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({"detail": scope_denial}, status_code=403)
         denial = auth.request_denial(request.method, request.url.path)
         if denial:
             from fastapi.responses import JSONResponse
@@ -329,13 +347,6 @@ def _api_push_register(body: PushRegisterBody):
     return {"ok": True, "devices": len(tokens)}
 
 
-def _api_pairing_info(request: Request):
-    """Payload the web app renders as the mobile-pairing QR."""
-    token = auth.session_token() if auth.auth_enabled() else ""
-    base = str(request.base_url).rstrip("/")
-    return {"serin": 1, "url": base, "token": token, "auth_enabled": auth.auth_enabled()}
-
-
 def _api_entitlements():
     """Active plan + features (open-core seam; 'opensource' when no pack)."""
     from backend import entitlements
@@ -381,8 +392,8 @@ def api_config() -> dict:
         "fmp_configured": settings.fmp_configured,
         "database_engine": settings.database_engine,
         "database_url_configured": settings.database_url_configured,
-        "email_configured": settings.email_configured,
-        "email_to": settings.email_to if settings.email_configured else "",
+        "email_configured": emailer.email_ready(),
+        "email_to": (settings.email_to or emailer.alt_recipient()) if emailer.email_ready() else "",
         "snaptrade_configured": snaptrade.snaptrade_available(),
         "display_currency": fx.display_currency(),
         "cloud_managed": settings.cloud_managed,
@@ -603,12 +614,16 @@ def api_price_history(period: str = Query(default="3m"), refresh: bool = Query(d
 
 @app.get("/api/news")
 async def api_news():
-    tickers = [
-        position.symbol
+    held = [
+        position
         for position in db.list_positions()
         if position.asset_type != "cash" and position.symbol != "CASH"
     ]
-    return await fetch_news(tickers)
+    # Names as well as tickers: feeds write "Netflix", not "NFLX".
+    return await fetch_news(
+        [position.symbol for position in held],
+        {position.symbol: position.name or "" for position in held},
+    )
 
 
 @app.get("/api/briefings")
@@ -668,10 +683,12 @@ async def api_run_briefing(background_tasks: BackgroundTasks, body: RunBriefingR
 
 @app.post("/api/briefings/{briefing_id}/email")
 async def api_email_briefing(briefing_id: int):
-    if not settings.email_configured:
+    if not emailer.email_ready():
         raise HTTPException(
             503,
-            "Email is not configured. Set SERIN_SMTP_HOST, SERIN_SMTP_USERNAME, "
+            "Email delivery isn't available for this account right now."
+            if emailer.alt_sender_installed()
+            else "Email is not configured. Set SERIN_SMTP_HOST, SERIN_SMTP_USERNAME, "
             "SERIN_SMTP_PASSWORD, and SERIN_EMAIL_TO in .env, then restart Serin.",
         )
     briefing = db.get_briefing(briefing_id)
@@ -680,7 +697,7 @@ async def api_email_briefing(briefing_id: int):
     if briefing.status != "done":
         raise HTTPException(400, "Only completed briefings can be emailed")
     try:
-        recipient = await asyncio.to_thread(emailer.send_briefing_email, briefing)
+        recipient = await asyncio.to_thread(emailer.deliver_scheduled_briefing_email, briefing)
     except Exception as exc:
         raise HTTPException(502, f"Email failed: {exc}") from exc
     emailed_at = db.mark_briefing_emailed(briefing.id)
@@ -703,13 +720,17 @@ class ConnectRequest(BaseModel):
     redirect: str | None = None
 
 
-@app.get("/api/broker/status")
 async def api_broker_status():
     return await asyncio.to_thread(snaptrade.status)
 
 
-@app.post("/api/broker/connect")
 async def api_broker_connect(body: ConnectRequest | None = None):
+    if not snaptrade.broker_sync_entitled():
+        raise HTTPException(
+            402,
+            "Brokerage sync is an add-on for hosted plans. Add it to your "
+            "subscription to connect a broker.",
+        )
     if not snaptrade.snaptrade_available():
         raise HTTPException(
             503,
@@ -723,8 +744,13 @@ async def api_broker_connect(body: ConnectRequest | None = None):
     return {"redirect_uri": url}
 
 
-@app.post("/api/broker/sync")
 async def api_broker_sync():
+    if not snaptrade.broker_sync_entitled():
+        raise HTTPException(
+            402,
+            "Brokerage sync is an add-on for hosted plans. Add it to your "
+            "subscription to connect a broker.",
+        )
     if not snaptrade.snaptrade_available():
         raise HTTPException(503, "SnapTrade is not configured.")
     try:
@@ -735,8 +761,13 @@ async def api_broker_sync():
         raise HTTPException(502, snaptrade.error_message(exc)) from exc
 
 
-@app.delete("/api/broker/connections/{authorization_id}")
 async def api_broker_disconnect(authorization_id: str):
+    if not snaptrade.broker_sync_entitled():
+        raise HTTPException(
+            402,
+            "Brokerage sync is an add-on for hosted plans. Add it to your "
+            "subscription to connect a broker.",
+        )
     if not snaptrade.snaptrade_available():
         raise HTTPException(503, "SnapTrade is not configured.")
     try:
@@ -747,19 +778,28 @@ async def api_broker_disconnect(authorization_id: str):
 
 
 class BackfillRequest(BaseModel):
-    days: int = 365
+    #: None means the account's entire history, which is the sensible default:
+    #: a shorter window turns old purchases into sales with no cost basis.
+    days: int | None = None
 
 
-@app.post("/api/broker/backfill")
 async def api_broker_backfill(body: BackfillRequest | None = None):
     """Import broker transaction history into the transactions table.
 
     Idempotent — already-imported activity ids are skipped, so this is safe
     to re-run any time.
     """
+    if not snaptrade.broker_sync_entitled():
+        raise HTTPException(
+            402,
+            "Brokerage sync is an add-on for hosted plans. Add it to your "
+            "subscription to connect a broker.",
+        )
     if not snaptrade.snaptrade_available():
         raise HTTPException(503, "SnapTrade is not configured.")
-    days = max(1, min((body.days if body else 365), 3650))
+    days = body.days if body else None
+    if days is not None:
+        days = max(1, min(days, 3650))
     try:
         return await asyncio.to_thread(snaptrade.backfill_transactions, days)
     except snaptrade.SnapTradeError as exc:
@@ -796,6 +836,21 @@ async def _api_performance():
     return await asyncio.to_thread(analytics.period_returns)
 
 
+async def _api_portfolio_history():
+    """Transaction-accurate portfolio performance, with a coverage verdict.
+
+    Separate from /performance, which answers the same question about the
+    invested sleeve and treats buys as contributions. This one draws the
+    boundary around the whole portfolio — holdings plus cash — so only
+    deposits and withdrawals count as flows. The two disagree by design, and
+    the coverage block says how much of either is reconstructed rather than
+    back-priced.
+    """
+    from backend import portfolio_history
+
+    return await asyncio.to_thread(portfolio_history.portfolio_performance)
+
+
 async def _api_fundamentals(symbol: str, asset_type: str = "stock"):
     data = await asyncio.to_thread(
         fundamentals.get_fundamentals, [symbol], {symbol: asset_type}
@@ -809,7 +864,116 @@ async def _api_fundamentals(symbol: str, asset_type: str = "stock"):
 _alias_v1("quote/{symbol}", _api_quote)
 _alias_v1("quote/{symbol}/history", _api_symbol_history)
 _alias_v1("quote/{symbol}/fundamentals", _api_fundamentals)
+# Broker sync. Registered under both prefixes because the mobile client only
+# speaks /api/v1 — these lived on /api/broker/* alone, which meant brokerage
+# connection was unreachable from the phone entirely.
+def api_broker_accounts():
+    """Every connected account, one row each — see backend.snaptrade.accounts.
+
+    Serin's own tables key on broker, so six real accounts collapse into three
+    rows once their holdings land. This reads the accounts themselves, which is
+    what a person recognises: the account they opened, its last four digits,
+    and what it holds.
+    """
+    import logging
+
+    from backend import snaptrade
+
+    try:
+        return {"accounts": snaptrade.accounts()}
+    except Exception as exc:
+        # The connections list must still render if this call fails; it is
+        # extra detail on a screen that already works without it.
+        logging.getLogger(__name__).warning(
+            "broker accounts lookup failed: %s", exc)
+        return {"accounts": [], "error": "Could not read account details."}
+
+
+class _RelayQuote(BaseModel):
+    symbol: str
+    price: float
+    asset_type: str = "stock"
+    sector: str = ""
+
+
+class _RelayBody(BaseModel):
+    quotes: list[_RelayQuote]
+    source: str = "relay"
+
+
+def _relay_authorised(authorization: str) -> None:
+    """Gate for the relay routes, or a 404 that tells a scanner nothing.
+
+    404 rather than 401 for a bad token on purpose: a scan cannot then tell a
+    wrong secret from an endpoint that is switched off, and the two look
+    identical from outside.
+    """
+    import secrets as _secrets
+
+    from backend.config import settings
+
+    token = (settings.price_relay_token or "").strip()
+    presented = (authorization or "").removeprefix("Bearer ").strip()
+    if not token or not presented or not _secrets.compare_digest(presented, token):
+        raise HTTPException(404, "Price relay is not enabled on this deployment.")
+
+
+def _api_relay_tracked(authorization: str = Header(default="")):
+    """What this deployment prices, so a relay knows what to fetch.
+
+    The union across every account, which is the same set the sweep walks —
+    quotes are the same number for everyone holding the symbol, so a relay
+    priced per customer would be doing the same work repeatedly.
+    """
+    from backend import db, scope
+
+    _relay_authorised(authorization)
+    with scope.using(scope.INSTANCE_SCOPE):
+        return [
+            {"symbol": symbol, "asset_type": asset_type}
+            for symbol, asset_type in db.list_tracked_symbols()
+        ]
+
+
+def _api_ingest_prices(body: _RelayBody, authorization: str = Header(default="")):
+    """Accept prices from a feed running outside this deployment.
+
+    Serin's own providers run wherever Serin runs, which is not always where
+    they work: Yahoo answers a residential address and 429s a datacenter one,
+    so the same code that fails on the server succeeds on a laptop at home.
+    This lets that machine do the fetching and post the result in, and it is
+    the same seam for anyone who has a feed of their own — a terminal, a
+    broker session, a licensed subscription Serin does not integrate.
+
+    Prices land in the shared cache the sweep already reads, so nothing
+    downstream needs to know where a number came from. The sweep skips
+    whatever the relay is keeping current, which is what turns this into a
+    replacement for provider calls rather than an addition to them.
+    """
+    from backend import db, scope
+
+    _relay_authorised(authorization)
+
+    if len(body.quotes) > 2000:
+        raise HTTPException(413, "Too many quotes in one post; send at most 2000.")
+
+    with scope.using(scope.INSTANCE_SCOPE):
+        written = db.cache_quotes(
+            (q.symbol, q.asset_type, q.price, q.sector) for q in body.quotes
+        )
+    return {"accepted": len(body.quotes), "written": written, "source": body.source}
+
+
+_alias_v1("prices/ingest", _api_ingest_prices, methods=["POST"])
+_alias_v1("prices/tracked", _api_relay_tracked)
+_alias_v1("broker/status", api_broker_status)
+_alias_v1("broker/accounts", api_broker_accounts)
+_alias_v1("broker/connect", api_broker_connect, methods=["POST"])
+_alias_v1("broker/sync", api_broker_sync, methods=["POST"])
+_alias_v1("broker/backfill", api_broker_backfill, methods=["POST"])
+_alias_v1("broker/connections/{authorization_id}", api_broker_disconnect, methods=["DELETE"])
 _alias_v1("performance", _api_performance)
+_alias_v1("portfolio-history", _api_portfolio_history)
 _alias_v1("briefings/estimate", api_briefing_estimate)
 
 
@@ -839,6 +1003,15 @@ def api_v1_version():
 app.add_api_route("/api/v1/config", api_config, methods=["GET"])
 app.add_api_route("/api/v1/portfolio", api_portfolio, methods=["GET"])
 app.add_api_route("/api/v1/positions", api_positions, methods=["GET"])
+# The write half of the same resource. Missing until now, which made the whole
+# versioned contract read-only without saying so: the mobile client posts here
+# to add, edit and delete a holding, and every one of those answered 405. Pull
+# to refresh was the quiet one — its re-quote is fire-and-forget, so the 405
+# was swallowed and the gesture just never fetched a price.
+app.add_api_route("/api/v1/positions", api_create_position, methods=["POST"])
+app.add_api_route("/api/v1/positions/{position_id}", api_update_position, methods=["PUT"])
+app.add_api_route("/api/v1/positions/{position_id}", api_delete_position, methods=["DELETE"])
+app.add_api_route("/api/v1/prices/refresh", api_refresh_prices, methods=["POST"])
 app.add_api_route("/api/v1/briefings", api_list_briefings, methods=["GET"])
 app.add_api_route("/api/v1/briefings/{briefing_id}", api_get_briefing, methods=["GET"])
 app.add_api_route("/api/v1/news", api_news, methods=["GET"])
@@ -1046,8 +1219,35 @@ def _api_connector_docs(connector_id: str):
 # tracking, accurate cost basis, and real TWR/MWR downstream.
 # ---------------------------------------------------------------------------
 
-def _api_transactions(symbol: str | None = None, action: str | None = None, limit: int = 500):
-    return {"transactions": db.list_transactions(symbol=symbol, action=action, limit=limit)}
+def _api_transactions(
+    symbol: str | None = None,
+    action: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    broker: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    source: str | None = None,
+):
+    """One page of the ledger, plus the total it is a page of.
+
+    ``total`` is what makes the view honest: a ledger imported from a broker
+    export runs to hundreds of rows, and a table that silently shows the first
+    200 of 512 is worse than one that says so.
+    """
+    limit = max(1, min(limit, 500))
+    filters = {"symbol": symbol, "action": action, "broker": broker,
+               "since": since, "until": until, "source": source}
+    return {
+        "transactions": db.list_transactions(limit=limit, offset=offset, **filters),
+        "total": db.count_transactions(**filters),
+        "limit": limit,
+        "offset": max(0, offset),
+    }
+
+
+def _api_transaction_facets():
+    return db.transaction_facets()
 
 
 def _api_create_transaction(body: TransactionIn):
@@ -1057,10 +1257,75 @@ def _api_create_transaction(body: TransactionIn):
         raise HTTPException(400, str(exc)) from exc
 
 
+def _api_update_transaction(transaction_id: int, body: TransactionIn):
+    """Correct a recorded transaction.
+
+    This exists because import is fallible: a broker code read as a fee when it
+    was a dividend is invisible until someone can see the row and fix it.
+    """
+    try:
+        updated = db.update_transaction(transaction_id, body)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if updated is None:
+        raise HTTPException(404, "transaction not found")
+    return updated
+
+
 def _api_delete_transaction(transaction_id: int):
     if not db.delete_transaction(transaction_id):
         raise HTTPException(404, "transaction not found")
     return {"ok": True}
+
+
+def _api_data_gaps():
+    """What is missing and what would fix it — see backend/data_gaps.py."""
+    from backend import data_gaps
+
+    return data_gaps.data_gaps()
+
+
+class _GapDismissBody(BaseModel):
+    id: str
+    dismissed: bool = True
+
+
+def _api_dismiss_gap(body: _GapDismissBody):
+    """Put one reminder away, or bring it back.
+
+    Server-side because the same person reads this on a phone and acts on it
+    at a desk; a reminder that reappears on the other device has been hidden
+    rather than dealt with.
+    """
+    from backend import data_gaps
+
+    data_gaps.set_dismissed(body.id, body.dismissed)
+    return data_gaps.data_gaps()
+
+
+def _api_realized(year: str | None = None):
+    """Realized results for a tax year, or all time when year is omitted.
+
+    Matched gains and unmatched proceeds are returned as separate figures and
+    must stay that way in any caller: a sale whose purchase predates the ledger
+    has proceeds, not profit, and adding the two produces a number that looks
+    authoritative and is not.
+    """
+    from backend import realized
+
+    return {**realized.realized_gains(year), "years": realized.available_years()}
+
+
+def _api_realized_detail(kind: str, year: str | None = None):
+    """The individual events behind one figure on the Realized results panel.
+
+    Walks the same lots as the summary, so the rows add up to the card that
+    was clicked. ``kind`` is one of net / gains / income / costs; anything else
+    answers with nothing rather than with everything.
+    """
+    from backend import realized
+
+    return realized.realized_detail(kind, year)
 
 
 def _api_transaction_summary():
@@ -1069,8 +1334,14 @@ def _api_transaction_summary():
 
 _alias_v1("transactions", _api_transactions)
 _alias_v1("transactions", _api_create_transaction, methods=["POST"])
+_alias_v1("transactions/{transaction_id}", _api_update_transaction, methods=["PUT"])
 _alias_v1("transactions/{transaction_id}", _api_delete_transaction, methods=["DELETE"])
 _alias_v1("transactions/summary", _api_transaction_summary)
+_alias_v1("transactions/realized", _api_realized)
+_alias_v1("transactions/realized/{kind}", _api_realized_detail)
+_alias_v1("data-gaps", _api_data_gaps)
+_alias_v1("data-gaps/dismiss", _api_dismiss_gap, methods=["POST"])
+_alias_v1("transactions/facets", _api_transaction_facets)
 
 
 # ---------------------------------------------------------------------------
@@ -1109,11 +1380,18 @@ _alias_v1("connectors/{connector_id}/sync", _api_connector_sync, methods=["POST"
 _alias_v1("connectors/{connector_id}/run", _api_connector_run, methods=["POST"])
 _alias_v1("connectors/{connector_id}/docs", _api_connector_docs)
 _alias_v1("push/register", _api_push_register, methods=["POST"])
-_alias_v1("pairing", _api_pairing_info)
 _alias_v1("entitlements", _api_entitlements)
 _alias_v1("license", _api_get_license)
 _alias_v1("license", _api_put_license, methods=["PUT"])
 _alias_v1("license", _api_delete_license, methods=["DELETE"])
+# Agent surface — the tool layer over HTTP, plus token management. Registered
+# here rather than in the alias block because these are routers, and they must
+# be in place before the SPA catch-all at the bottom of this file, which would
+# otherwise swallow /api/agent as a frontend path.
+app.include_router(agent_api.agent_router)
+app.include_router(agent_api.token_router)
+
+
 _alias_v1("admin/install-pack", _api_install_pack, methods=["POST"])
 _alias_v1("billing/checkout", _api_billing_checkout, methods=["POST"])
 _alias_v1("billing/cancel/request", _api_billing_cancel_request, methods=["POST"])
@@ -1131,9 +1409,12 @@ _alias_v1("cloud/migrate", _api_cloud_migrate, methods=["POST"])
 _IMAGE_MIME_TYPES = {
     "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
 }
+_MAX_SMART_IMPORT_FILE_BYTES = 15 * 1024 * 1024
+_MAX_SMART_IMPORT_BASE64_CHARS = ((_MAX_SMART_IMPORT_FILE_BYTES + 2) // 3) * 4
 
 
 async def _api_import_extract(
+    request: Request,
     file: UploadFile | None = File(default=None),
     text: str | None = Form(default=None),
     hint: str | None = Form(default=None),
@@ -1146,11 +1427,43 @@ async def _api_import_extract(
     image_mime: str | None = None
     pdf_bytes: bytes | None = None
     extracted_text: str | None = text
+    content: bytes | None = None
+    mime = ""
+    filename = ""
 
     if file is not None:
         content = await file.read()
         mime = (file.content_type or "").lower()
         filename = (file.filename or "").lower()
+    elif "application/json" in request.headers.get("content-type", "").lower():
+        # iOS Safari can retain a File in the picker UI while its service
+        # worker forwards an empty multipart form. The web client retries only
+        # that exact failure as JSON, which uses the same reliable request path
+        # as every other Serin mutation. Keep multipart as the primary contract
+        # for native clients and ordinary browsers.
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "Could not read the Smart Import request.") from exc
+        if isinstance(payload, dict):
+            extracted_text = str(payload.get("text") or "") or extracted_text
+            hint = str(payload.get("hint") or "") or hint
+            encoded = str(payload.get("file_base64") or "")
+            if encoded.startswith("data:") and "," in encoded:
+                encoded = encoded.split(",", 1)[1]
+            if encoded:
+                if len(encoded) > _MAX_SMART_IMPORT_BASE64_CHARS:
+                    raise HTTPException(413, "Smart Import files must be 15 MB or smaller.")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise HTTPException(400, "Could not decode the uploaded file.") from exc
+                mime = str(payload.get("content_type") or "").lower()
+                filename = str(payload.get("filename") or "upload").lower()
+
+    if content is not None:
+        if len(content) > _MAX_SMART_IMPORT_FILE_BYTES:
+            raise HTTPException(413, "Smart Import files must be 15 MB or smaller.")
         if mime in _IMAGE_MIME_TYPES or filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
             image_bytes = content
             image_mime = mime if mime in _IMAGE_MIME_TYPES else f"image/{filename.rsplit('.', 1)[-1]}"
@@ -1166,6 +1479,37 @@ async def _api_import_extract(
 
     if not extracted_text and image_bytes is None and pdf_bytes is None:
         raise HTTPException(400, "Provide a file or paste text to extract from.")
+
+    # A recognised broker export is parsed, not inferred. Sending a structured
+    # CSV to a vision model costs tokens proportional to the user's entire
+    # trading history and returns a different answer each time — see
+    # backend/broker_csv.py. Anything unrecognised falls through to the model.
+    if extracted_text:
+        parsed_export = await asyncio.to_thread(broker_csv.parse, extracted_text)
+        if parsed_export is not None and parsed_export.transactions:
+            notes = broker_csv.summarise(parsed_export)
+            if parsed_export.warnings:
+                notes = f"{notes} {' '.join(parsed_export.warnings[:5])}"
+            import logging
+
+            logging.getLogger(__name__).info(
+                "broker csv import: broker=%s rows=%d parsed=%d unknown=%d",
+                parsed_export.broker, parsed_export.total_rows,
+                len(parsed_export.transactions), len(parsed_export.unknown),
+            )
+            return {
+                "rows": [],
+                "row_count": 0,
+                "transactions": parsed_export.transactions,
+                "transaction_count": len(parsed_export.transactions),
+                "notes": notes,
+                "notice": (
+                    f"Parsed on this server from your {parsed_export.label} export. "
+                    "Nothing was sent to an AI provider."
+                ),
+                "broker_format": parsed_export.label,
+                "unknown_codes": parsed_export.unknown[:40],
+            }
 
     try:
         result = await smart_import.extract(
@@ -1191,8 +1535,26 @@ async def _api_positions_bulk(body: _BulkBody):
     return await asyncio.to_thread(smart_import.bulk_insert, body.rows, replace=body.replace)
 
 
+class _TransactionsBulkBody(BaseModel):
+    transactions: list[dict] = []
+
+
+async def _api_transactions_bulk(body: _TransactionsBulkBody):
+    """Commit reviewed transactions from a statement import.
+
+    Separate from positions/bulk because the two answer different questions —
+    what you hold now, and what happened — and a statement often contains only
+    one of them. Re-importing is safe: rows already seen are skipped, not
+    duplicated.
+    """
+    if not body.transactions:
+        raise HTTPException(400, "transactions is empty — nothing to import.")
+    return await asyncio.to_thread(smart_import.import_transactions, body.transactions)
+
+
 _alias_v1("import/extract", _api_import_extract, methods=["POST"])
 _alias_v1("positions/bulk", _api_positions_bulk, methods=["POST"])
+_alias_v1("transactions/bulk", _api_transactions_bulk, methods=["POST"])
 
 
 dist_dir = REPO_ROOT / "frontend" / "dist"
@@ -1211,13 +1573,18 @@ if dist_dir.exists():
         """
         landing = dist_dir / "landing.html"
         if landing.exists():
-            return FileResponse(landing)
+            # Marketing HTML changes independently of the hashed app assets.
+            # Force browsers to revalidate it so a release cannot leave the
+            # previous front page sitting in a heuristic cache.
+            return FileResponse(landing, headers={"Cache-Control": "no-cache"})
         return RedirectResponse("/app", status_code=302)
 
     @app.get("/app")
     def app_page():
         """The portfolio app (hash-routed SPA)."""
-        return FileResponse(dist_dir / "index.html")
+        return FileResponse(
+            dist_dir / "index.html", headers={"Cache-Control": "no-cache"}
+        )
 
     @app.get("/welcome")
     def landing_page():
@@ -1246,6 +1613,8 @@ if dist_dir.exists():
         "privacy": (REPO_ROOT / "docs" / "PRIVACY-POLICY.md", "Privacy"),
         "terms": (REPO_ROOT / "docs" / "TERMS.md", "Terms & refunds"),
         "deploy": (REPO_ROOT / "docs" / "DEPLOY.md", "Deploy"),
+        "contact": (REPO_ROOT / "docs" / "CONTACT.md", "Contact"),
+        "exports": (REPO_ROOT / "docs" / "BROKER-EXPORTS.md", "Broker exports"),
     }
     _doc_cache: dict[str, tuple[float, str]] = {}
 
@@ -1267,8 +1636,13 @@ if dist_dir.exists():
             import html as html_mod
 
             body = f"<pre style='white-space:pre-wrap'>{html_mod.escape(text)}</pre>"
-        nav = " · ".join(
+        nav = "".join(
             f'<a href="/{s}">{t}</a>' for s, (_p, t) in _DOC_PAGES.items() if s != slug
+        )
+        foot = "".join(
+            f'<a class="link" href="/{s}">{t}</a>'
+            for s, (_p, t) in _DOC_PAGES.items()
+            if s != slug
         )
         page = f"""<!doctype html>
 <html lang="en"><head>
@@ -1276,52 +1650,109 @@ if dist_dir.exists():
 <title>{title} — Serin</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet"/>
 <style>
-  :root {{ --bg:#f3f4f7; --ink:#171b26; --sec:#4c5566; --mut:#8a93a6; --acc:#2f6bed; --bd:#e4e7ee; }}
+  /* Same tokens as the landing page. These pages used to arrive in a cool
+     grey-and-blue theme with a different typeface, so following "Terms" from
+     the footer felt like leaving the site. */
+  :root {{ --jade:#016558; --jade-deep:#014d43; --cream:#f3f0e8; --paper:#fbf8f1;
+           --ink:#17231f; --muted:#5f6b66; --line:#bbb7ab; }}
   * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:var(--bg); color:var(--ink); font:16px/1.65 'Manrope',ui-sans-serif,system-ui,sans-serif;
+  /* Column layout so the jade footer sits at the bottom of the viewport on a
+     short page instead of floating with cream beneath it. */
+  html {{ height:100%; }}
+  body {{ background:var(--cream); color:var(--ink); min-height:100%;
+          display:flex; flex-direction:column;
+          font:16px/1.65 "DM Sans",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
           -webkit-font-smoothing:antialiased; }}
-  .page {{ max-width:760px; margin:0 auto; padding:40px 24px 80px; }}
-  .top {{ display:flex; align-items:baseline; gap:14px; margin-bottom:34px; flex-wrap:wrap; }}
-  .top a {{ color:var(--sec); text-decoration:none; font-size:13.5px; font-weight:600; }}
-  .top a:hover {{ color:var(--acc); }}
-  .top .home {{ font-weight:800; font-size:17px; color:var(--ink); }}
-  .doc h1 {{ font-size:30px; letter-spacing:-0.02em; margin:0 0 18px; }}
-  .doc h2 {{ font-size:20px; letter-spacing:-0.01em; margin:32px 0 10px; }}
-  .doc h3 {{ font-size:16px; margin:24px 0 8px; }}
-  .doc p, .doc li {{ color:var(--sec); margin-bottom:12px; }}
+  a {{ color:var(--jade); }}
+  :focus-visible {{ outline:2px solid var(--jade); outline-offset:3px; }}
+  .page {{ width:100%; max-width:760px; margin:0 auto; padding:34px 24px 0; flex:1 0 auto; }}
+  .top {{ display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;
+          padding-bottom:20px; margin-bottom:34px; border-bottom:1px solid var(--line); }}
+  .top a {{ color:var(--muted); text-decoration:none; font-size:13.5px; font-weight:600; }}
+  .top a:hover {{ color:var(--jade); }}
+  .top .home {{ margin-right:auto; color:var(--jade); font-size:30px; font-weight:700;
+                letter-spacing:-1.6px; }}
+  .doc h1, .doc h2, .doc h3 {{ font-family:"Instrument Serif",Georgia,"Times New Roman",serif;
+                               font-weight:400; letter-spacing:-0.01em; }}
+  .doc h1 {{ font-size:44px; line-height:1.1; margin:0 0 20px; }}
+  .doc h2 {{ font-size:28px; margin:38px 0 12px; }}
+  .doc h3 {{ font-size:20px; margin:26px 0 8px; }}
+  .doc p, .doc li {{ color:var(--muted); margin-bottom:12px; }}
   .doc li {{ margin-left:22px; margin-bottom:6px; }}
-  .doc a {{ color:var(--acc); }}
-  .doc code {{ background:#e9ecf2; border-radius:5px; padding:1px 5px; font-size:14px; }}
-  .doc pre {{ background:#171b26; color:#e6e9f0; border-radius:10px; padding:14px 16px; overflow-x:auto; margin-bottom:14px; }}
-  .doc pre code {{ background:none; padding:0; color:inherit; }}
-  .doc table {{ border-collapse:collapse; margin-bottom:14px; }}
-  .doc th, .doc td {{ border:1px solid var(--bd); padding:7px 11px; font-size:14.5px; color:var(--sec); text-align:left; }}
-  .doc blockquote {{ border-left:3px solid var(--bd); padding-left:14px; color:var(--mut); margin-bottom:12px; }}
+  .doc strong {{ color:var(--ink); }}
+  .doc code {{ background:var(--paper); border:1px solid var(--line); border-radius:5px;
+               padding:1px 5px; font-size:14px;
+               font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  .doc pre {{ background:var(--jade-deep); color:#e8f1ee; border-radius:13px;
+              padding:16px 18px; overflow-x:auto; margin-bottom:14px; }}
+  .doc pre code {{ background:none; border:none; padding:0; color:inherit; }}
+  .doc table {{ border-collapse:collapse; margin-bottom:14px; width:100%; display:block;
+                overflow-x:auto; }}
+  .doc th, .doc td {{ border:1px solid var(--line); padding:8px 12px; font-size:14.5px;
+                      color:var(--muted); text-align:left; }}
+  .doc th {{ color:var(--ink); font-weight:700; background:var(--paper); }}
+  .doc blockquote {{ border-left:3px solid var(--jade); padding-left:16px;
+                     color:var(--muted); margin-bottom:12px; }}
+  .doc hr {{ border:none; border-top:1px solid var(--line); margin:28px 0; }}
+  .foot {{ margin-top:60px; background:var(--jade); color:#f7f2e9; flex:0 0 auto; }}
+  /* Wordmark and links share the first row; the licence line takes its own,
+     because four links plus the tagline do not fit the 760px text column and
+     wrapping mid-list looked like a mistake. */
+  .foot-in {{ max-width:760px; margin:0 auto; padding:26px 24px;
+              display:flex; align-items:center; gap:12px 22px; flex-wrap:wrap; }}
+  .foot .brand {{ color:white; font-size:30px; font-weight:700; letter-spacing:-1.6px;
+                  text-decoration:none; }}
+  .foot-links {{ margin-left:auto; display:flex; gap:20px; flex-wrap:wrap; }}
+  .foot .say {{ order:3; width:100%; color:#cfe0da; font-size:13px; }}
+  .foot a.link {{ color:#e6efec; font-size:13.5px; font-weight:600; text-decoration:none;
+                  white-space:nowrap; }}
+  .foot a.link:hover {{ color:white; text-decoration:underline; }}
+  @media (max-width:620px) {{
+    .doc h1 {{ font-size:34px; }}
+    .foot-links {{ margin-left:0; }}
+  }}
 </style></head>
-<body><div class="page">
-  <nav class="top"><a class="home" href="/">serin</a><span style="color:var(--mut)">·</span>{nav}</nav>
-  <main class="doc">{body}</main>
-</div></body></html>"""
+<body>
+  <div class="page">
+    <nav class="top"><a class="home" href="/">serin</a>{nav}</nav>
+    <main class="doc">{body}</main>
+  </div>
+  <footer class="foot"><div class="foot-in">
+    <a class="brand" href="/">serin</a>
+    <div class="foot-links">{foot}</div>
+    <span class="say">AGPLv3 · no telemetry · context, never trade directives</span>
+  </div></footer>
+</body></html>"""
         _doc_cache[slug] = (mtime, page)
         return HTMLResponse(page)
 
-    @app.get("/security")
-    def security_page():
-        return _doc_page("security")
+    # Registered from the registry rather than one decorator per page. Keeping
+    # two lists in step is the same trap that made /contact 404 in production:
+    # adding a page to _DOC_PAGES and *serving* it were two separate acts, and
+    # doing only the first returns the SPA shell — a 200 that looks fine to a
+    # link checker and shows a reviewer the wrong thing.
+    for _slug in _DOC_PAGES:
+        app.add_api_route(
+            f"/{_slug}",
+            (lambda slug=_slug: lambda: _doc_page(slug))(),
+            methods=["GET"],
+            response_class=HTMLResponse,
+            include_in_schema=False,
+        )
 
-    @app.get("/privacy")
-    def privacy_page():
-        return _doc_page("privacy")
+    @app.get("/support")
+    def support_page():
+        """App Store Connect requires a Support URL and SnapTrade's review asks
+        for a contact page. Same page, two names, because both will be typed by
+        people who guessed rather than followed a link."""
+        return RedirectResponse("/contact", status_code=301)
 
-    @app.get("/terms")
-    def terms_page():
-        return _doc_page("terms")
-
-    @app.get("/deploy")
-    def deploy_page():
-        return _doc_page("deploy")
+    @app.get("/help")
+    def help_page():
+        return RedirectResponse("/contact", status_code=301)
 
     @app.get("/refund")
     def refund_page():

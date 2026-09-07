@@ -67,6 +67,10 @@ def test_spa_shell_stays_public_when_locked(fresh, monkeypatch):
     if response.status_code == 302:
         assert response.headers["location"] == "/app"
 
+    app_shell = client.get("/app")
+    assert app_shell.status_code == 200
+    assert app_shell.headers["cache-control"] == "no-cache"
+
 
 # --- backup / restore -----------------------------------------------------------
 
@@ -159,7 +163,10 @@ def test_legacy_database_migrates_to_current_version(tmp_path):
     db.init_db()
 
     assert db.schema_version() == db.MIGRATIONS[-1][0]  # fully migrated
-    position = db.list_positions()[0]
+    # include_closed: the legacy fixture inserts a row with no quantity, which
+    # now reads as a closed holding. The point here is that migrations preserve
+    # it and backfill its columns, not that it shows on a dashboard.
+    position = db.list_positions(include_closed=True)[0]
     assert position.symbol == "OLD"
     assert position.currency == "USD"   # added by migration 4
     assert position.source == "manual"  # added by migration 3

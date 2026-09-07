@@ -7,6 +7,8 @@ import {
   signedPct,
   quantityLabel,
   brokerLabel,
+  brokerOptions,
+  normalizeBroker,
   lotKey,
   groupTaxLots,
 } from '../format.js';
@@ -22,14 +24,22 @@ function SortTh({ label, col, sortCol, sortDir, onSort, align = 'right' }) {
 
 export function dayChangeFor(position, priceHistory) {
   if (['cash', 'option'].includes(position.asset_type)) return null;
-  const closes = priceHistory[position.symbol]?.closes;
-  if (!closes || closes.length < 2) return null;
-  const last = closes[closes.length - 1];
-  const prev = closes[closes.length - 2];
+  const series = priceHistory[position.symbol];
+  const closes = series?.closes;
+  if (!closes || !closes.length) return null;
+  // The newest bar only becomes "today" once today's close lands; until then
+  // closes[-1] IS the previous close and the row's live price is "now".
+  // Comparing the last two bars unconditionally showed yesterday's move
+  // labeled as today's, against a close from the day before that.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const lastIsToday = String(series?.dates?.[closes.length - 1] || '').slice(0, 10) === todayIso;
+  const prev = lastIsToday ? closes[closes.length - 2] : closes[closes.length - 1];
+  const now = position.current_price > 0 ? position.current_price : closes[closes.length - 1];
   if (!prev) return null;
   return {
-    value: (last - prev) * position.quantity,
-    pct: ((last - prev) / prev) * 100,
+    value: (now - prev) * position.quantity,
+    pct: ((now - prev) / prev) * 100,
+    prevValue: prev * position.quantity,
   };
 }
 
@@ -203,7 +213,7 @@ const EMPTY_FORM = {
 
 export const COMMON_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'HKD', 'SGD'];
 
-export function PositionModal({ editing, busy, onClose, onSubmit }) {
+export function PositionModal({ editing, brokers = [], busy, onClose, onSubmit }) {
   const [form, setForm] = useState(() => (
     editing
       ? {
@@ -229,10 +239,14 @@ export function PositionModal({ editing, busy, onClose, onSubmit }) {
 
   const setField = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
   const isCash = form.asset_type === 'cash';
+  const availableBrokers = useMemo(
+    () => brokerOptions([editing?.broker, ...brokers]),
+    [brokers, editing?.broker],
+  );
 
   function handleSubmit(event) {
     event.preventDefault();
-    const symbol = form.symbol.trim().toUpperCase();
+    const symbol = isCash ? 'CASH' : form.symbol.trim().toUpperCase();
     const sector = editing && symbol === editing.symbol && form.asset_type === editing.asset_type
       ? editing.sector || ''
       : '';
@@ -256,9 +270,11 @@ export function PositionModal({ editing, busy, onClose, onSubmit }) {
         <form onSubmit={handleSubmit}>
           <div className="modal-body">
             <div className="form-grid">
-              <label className="form-label">Symbol
-                <input value={form.symbol} onChange={e => setField('symbol', e.target.value)} placeholder="AAPL" required autoFocus={!editing} />
-              </label>
+              {!isCash && (
+                <label className="form-label">Symbol
+                  <input value={form.symbol} onChange={e => setField('symbol', e.target.value)} placeholder="AAPL" required autoFocus={!editing} />
+                </label>
+              )}
               <label className="form-label">Type
                 <select value={form.asset_type} onChange={e => setField('asset_type', e.target.value)}>
                   <option value="stock">Stock</option>
@@ -272,7 +288,11 @@ export function PositionModal({ editing, busy, onClose, onSubmit }) {
                 <input value={form.name} onChange={e => setField('name', e.target.value)} placeholder="Optional display name" />
               </label>
               <label className="form-label">Broker
-                <input value={form.broker} onChange={e => setField('broker', e.target.value)} placeholder="robinhood, etrade…" required />
+                <select value={normalizeBroker(form.broker)} onChange={e => setField('broker', e.target.value)} required>
+                  {availableBrokers.map(broker => (
+                    <option key={broker} value={broker}>{brokerLabel(broker)}</option>
+                  ))}
+                </select>
               </label>
               <label className="form-label">{isCash ? 'Balance ($)' : 'Quantity'}
                 <input type="number" min="0" step="any" value={form.quantity} onChange={e => setField('quantity', e.target.value)} placeholder="0" required />
@@ -360,8 +380,13 @@ export function TaxLotsDrawer({ position, lots, busy, onClose, onCreate, onDelet
     const onKey = event => {
       if (event.key === 'Escape') onClose();
     };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
   }, [onClose]);
 
   if (!position) return null;
@@ -370,22 +395,26 @@ export function TaxLotsDrawer({ position, lots, busy, onClose, onCreate, onDelet
   const longGain = lots.filter(lot => lot.holding_period === 'long-term').reduce((sum, lot) => sum + lot.unrealized_gain, 0);
   const lossCandidates = lots.filter(lot => lot.unrealized_gain < 0).length;
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
-    onCreate({
+    if (busy === 'tax-lot') return;
+    // Read from the submitted controls instead of trusting the last React
+    // change event. Mobile date pickers can paint their selected value before
+    // Safari dispatches that event, which used to submit the previous date.
+    const values = new FormData(event.currentTarget);
+    const created = await onCreate({
       symbol: position.symbol,
       broker: position.broker,
-      quantity: Number(form.quantity || 0),
-      cost_basis: Number(form.cost_basis || 0),
-      acquired_at: form.acquired_at,
+      quantity: Number(values.get('quantity') || 0),
+      cost_basis: Number(values.get('cost_basis') || 0),
+      acquired_at: String(values.get('acquired_at') || ''),
     });
-    setForm(prev => ({ ...prev, quantity: '' }));
+    if (created) setForm(prev => ({ ...prev, quantity: '' }));
   }
 
   return (
-    <>
-      <div className="drawer-overlay" onClick={onClose} />
-      <aside className="drawer" aria-label="Tax lots">
+    <div className="drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+      <aside className="drawer" aria-label="Tax lots" aria-modal="true" role="dialog">
         <div className="drawer-head">
           <div>
             <h2>Tax Lots</h2>
@@ -446,17 +475,17 @@ export function TaxLotsDrawer({ position, lots, busy, onClose, onCreate, onDelet
         <form className="tax-form" onSubmit={submit}>
           <h3>Add Lot</h3>
           <label className="form-label">Shares
-            <input type="number" min="0" step="any" value={form.quantity} onChange={event => setForm(prev => ({ ...prev, quantity: event.target.value }))} required />
+            <input name="quantity" inputMode="decimal" type="number" min="0.00000001" step="any" value={form.quantity} onChange={event => setForm(prev => ({ ...prev, quantity: event.target.value }))} required />
           </label>
           <label className="form-label">Price paid
-            <input type="number" min="0" step="any" value={form.cost_basis} onChange={event => setForm(prev => ({ ...prev, cost_basis: event.target.value }))} required />
+            <input name="cost_basis" inputMode="decimal" type="number" min="0.00000001" step="any" value={form.cost_basis} onChange={event => setForm(prev => ({ ...prev, cost_basis: event.target.value }))} required />
           </label>
           <label className="form-label">Purchase date
-            <input type="date" value={form.acquired_at} onChange={event => setForm(prev => ({ ...prev, acquired_at: event.target.value }))} required />
+            <input name="acquired_at" type="date" value={form.acquired_at} onChange={event => setForm(prev => ({ ...prev, acquired_at: event.target.value }))} required />
           </label>
           <button className="btn btn-primary" disabled={busy === 'tax-lot'}>{busy === 'tax-lot' ? 'Adding…' : 'Add lot'}</button>
         </form>
       </aside>
-    </>
+    </div>
   );
 }

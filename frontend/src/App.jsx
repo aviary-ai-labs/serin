@@ -3,24 +3,33 @@ import { api, setAuthToken } from './api.js';
 import { money, signedMoney, signedPct, dateShort, setDisplayCurrency } from './format.js';
 import { COMMON_CURRENCIES } from './components/Positions.jsx';
 import { PortfolioTrendChart, filterHistoryByRange } from './components/Charts.jsx';
-import { PositionsTable, PositionModal, ConfirmDialog, TaxLotsDrawer } from './components/Positions.jsx';
+import { PositionsTable, PositionModal, ConfirmDialog, TaxLotsDrawer, dayChangeFor } from './components/Positions.jsx';
 import { AllocationCard, TopHoldings, PositionInspector } from './components/Sidebar.jsx';
 import { useXray, XrayTeaser, XrayView } from './components/XrayCard.jsx';
 import { BriefingsView } from './components/Briefings.jsx';
 import { NewsView } from './components/News.jsx';
-import { ConnectionsPanel } from './components/Connections.jsx';
+import { Brokerages } from './components/Brokerages.jsx';
 import { PerformanceMetrics } from './components/PerformanceMetrics.jsx';
+import { TransactionsView } from './components/Transactions.jsx';
+import { DataGaps, ActionHub } from './components/DataGaps.jsx';
+import { CostBasisForm } from './components/CostBasisForm.jsx';
+import { primeStockChartCache } from './components/StockChart.jsx';
 import { StockDetail } from './components/StockDetail.jsx';
 import { StockGrid } from './components/StockGrid.jsx';
 import { ConnectorsView } from './components/Connectors.jsx';
+import { AgentAccess } from './components/AgentAccess.jsx';
+import { useChat, ChatView } from './components/ChatPanel.jsx';
 import { SmartImport } from './components/SmartImport.jsx';
-import { IconRefresh, IconUpload, IconDownload, IconPlus, IconLink, IconSignOut, IconX } from './components/Icons.jsx';
+import { IconRefresh, IconUpload, IconDownload, IconPlus, IconLink, IconSignOut, IconX, IconBell, IconMore } from './components/Icons.jsx';
+import { SerinBird } from './components/SerinBird.jsx';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
-  { id: 'stocks', label: 'Stocks' },
-  { id: 'briefings', label: 'Briefings' },
+  { id: 'stocks', label: 'Holdings' },
+  { id: 'transactions', label: 'Transactions' },
+  { id: 'briefings', label: 'Briefing' },
   { id: 'news', label: 'News' },
+  { id: 'brokerages', label: 'Brokerages' },
   { id: 'connectors', label: 'Connectors' },
 ];
 
@@ -31,26 +40,167 @@ const CSV_TEMPLATE = [
   'CASH,Cash,manual,cash,2500,1,1',
 ].join('\n');
 
-function BrandMark() {
-  // Three ascending rounded bars (Calm Dashboard mark). Tinted via .brand-mark in CSS.
+function BrandMark() { return <SerinBird className="brand-bird" />; }
+
+function StatCard({ label, value, sub, meta, subClass, valueClass, bird = false }) {
   return (
-    <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3" y="13" width="4" height="8" rx="1.2" />
-      <rect x="10" y="8" width="4" height="13" rx="1.2" />
-      <rect x="17" y="3" width="4" height="18" rx="1.2" />
+    <div className={`stat-card ${bird ? 'has-bird' : ''}`}>
+      <div className="stat-label">{label}</div>
+      <div className={`stat-value ${valueClass || ''}`}>{value}</div>
+      {sub != null && <div className={`stat-sub ${subClass || ''}`}>{sub}</div>}
+      {meta != null && <div className="stat-meta">{meta}</div>}
+      {bird && <SerinBird className="card-bird" />}
+    </div>
+  );
+}
+
+/**
+ * The transaction-aware return, for the headline.
+ *
+ * The overview used to lead with unrealized gain — market value minus cost
+ * basis on today's holdings. That number cannot include a single closed trade,
+ * so an active trader comparing Serin against their broker's year-to-date saw
+ * two figures that could never agree and reasonably concluded Serin was wrong.
+ * This is the comparable one: it rewinds actual holdings through the ledger.
+ *
+ * Failing quietly is deliberate. It needs transaction history, and a portfolio
+ * typed in by hand has none — the card falls back to unrealized gain rather
+ * than showing a gap where a number belongs.
+ */
+function usePortfolioReturn(refreshKey) {
+  const [state, setState] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api('/api/v1/portfolio-history')
+      .then(data => { if (alive) setState(data); })
+      .catch(() => { if (alive) setState(null); });
+    return () => { alive = false; };
+  }, [refreshKey]);
+  return state;
+}
+
+/**
+ * The controls that used to ride the header on every tab.
+ *
+ * Currency, Smart Import and the CSV template are onboarding tools and
+ * occasional settings — useful, and not what anyone opens the app for. Four
+ * full-width buttons on every screen made the first two inches of the page a
+ * toolbar, which is a lot of room to spend on things a person touches twice.
+ */
+function HeaderMenu({ currency, onCurrency, onSmartImport }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = event => { if (!box.current?.contains(event.target)) setOpen(false); };
+    const esc = event => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', away);
+    document.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('mousedown', away);
+      document.removeEventListener('keydown', esc);
+    };
+  }, [open]);
+
+  return (
+    <div className="header-menu" ref={box}>
+      <button type="button" className="icon-btn" onClick={() => setOpen(!open)}
+              aria-haspopup="menu" aria-expanded={open} aria-label="More actions"
+              title="More">
+        <IconMore />
+      </button>
+      {open && (
+        <div className="header-menu-pop" role="menu">
+          <button type="button" role="menuitem"
+                  onClick={() => { onSmartImport(); setOpen(false); }}>
+            <IconUpload /> Smart Import
+          </button>
+          <button type="button" role="menuitem"
+                  onClick={() => { downloadCsvTemplate(); setOpen(false); }}>
+            <IconDownload /> CSV template
+          </button>
+          <label className="header-menu-currency">
+            <span>Display currency</span>
+            <select value={currency} onChange={event => onCurrency(event.target.value)}>
+              {COMMON_CURRENCIES.map(code => <option key={code} value={code}>{code}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What to upload, for a gap that is closed by uploading something.
+ *
+ * The card already says what is wrong. Its button used to answer "where do I
+ * go" and not "what do I do", which left the reader on the Transactions tab in
+ * front of 984 rows with no indication which of them it meant.
+ */
+function briefFor(gap) {
+  const broker = (gap.broker || 'your broker').replace(/^\w/, c => c.toUpperCase());
+  const symbols = (gap.symbols || []).slice(0, 6).join(', ')
+    + ((gap.symbols || []).length > 6 ? ' and others' : '');
+  if (gap.code === 'sales_without_purchase') {
+    return {
+      title: `Upload a ${broker} statement from before ${gap.since}`,
+      detail: `${symbols} were sold from shares bought before your ${broker} history `
+        + 'starts. The purchase is what turns those proceeds into a gain.',
+      steps: [
+        `Open ${broker} and find its account activity or statement export.`,
+        `Choose a date range that ends on or before ${gap.since}.`,
+        'Download it as CSV or PDF, then drop it below.',
+      ],
+    };
+  }
+  if (gap.code === 'transferred_without_cost') {
+    return {
+      title: 'Upload the history of the account these shares came from',
+      detail: `${symbols} arrived in ${broker} by transfer, so ${broker} never `
+        + 'recorded what they cost. The account that sent them did.',
+      steps: [
+        'Open the stock-plan or sending brokerage account.',
+        'Export its transaction or benefit history.',
+        'Drop it below — or close this and use "Record what these shares cost".',
+      ],
+    };
+  }
+  return null;
+}
+
+function NavIcon({ id }) {
+  const common = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  return (
+    <svg className="sidebar-nav-icon" viewBox="0 0 24 24" aria-hidden="true" {...common}>
+      {id === 'overview' && <><path d="m3 11 9-8 9 8" /><path d="M5.5 9.5V21h13V9.5M9.5 21v-7h5v7" /></>}
+      {id === 'actions' && <><path d="M9 11.5 11 13.5 15.5 9" /><path d="M20 12a8 8 0 1 1-8-8" /><path d="M16.5 3.5 20 5l1.5 3.5" /></>}
+      {id === 'stocks' && <><path d="M5 20V12M12 20V5M19 20V9" /><path d="M3 20h18" /></>}
+      {id === 'xray' && <><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3.8" /><path d="M12 2v2M22 12h-2M12 22v-2M2 12h2" /></>}
+      {id === 'transactions' && <><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M7 9h6M7 13h10M7 17h4" /><path d="M17 8.5v3M15.5 10h3" /></>}
+      {id === 'briefings' && <><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7M9 16h7" /></>}
+      {id === 'news' && <><rect x="3" y="5" width="18" height="15" rx="2" /><path d="M7 9h4v4H7zM14 9h3M14 12h3M7 16h10" /></>}
+      {/* A bank front: the brokerage itself, distinct from the plug that
+          means 'data connector'. */}
+      {id === 'brokerages' && <><path d="M3 9.5 12 4l9 5.5" /><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8" /><path d="M3 21h18" /></>}
+      {id === 'connectors' && <><path d="M8 3v6M16 3v6M6 9h12v3a6 6 0 0 1-6 6v3M4 9h16" /></>}
     </svg>
   );
 }
 
-function StatCard({ label, value, sub, subClass, valueClass }) {
-  return (
-    <div className="stat-card">
-      <div className="stat-label">{label}</div>
-      <div className={`stat-value ${valueClass || ''}`}>{value}</div>
-      {sub != null && <div className={`stat-sub ${subClass || ''}`}>{sub}</div>}
-    </div>
-  );
-}
+const PAGE_META = {
+  overview: ['Good morning', 'A clear view across every account.'],
+  stocks: ['Holdings', 'Every position, across every account.'],
+  xray: ['Portfolio X-ray', 'Concentration, exposure, and risk in one diagnostic view.'],
+  transactions: ['Transactions', 'The ledger your returns are built from.'],
+  briefings: ['Daily Briefing', 'What changed, what matters, and what to review.'],
+  news: ['News', 'Headlines that intersect with your holdings.'],
+  brokerages: ['Brokerages', 'Connect an account and keep it in sync.'],
+  actions: ['Actions', 'What Serin cannot work out on its own, and what would fix it.'],
+  chat: ['Chat', 'Ask about your portfolio. Context, never trade directives.'],
+  connectors: ['Connectors', 'The data layer behind your portfolio.'],
+};
 
 function downloadCsvTemplate() {
   const blob = new Blob([CSV_TEMPLATE], { type: 'text/csv' });
@@ -62,7 +212,12 @@ function downloadCsvTemplate() {
   URL.revokeObjectURL(url);
 }
 
-const TAB_IDS = new Set(['overview', 'stocks', 'xray', 'briefings', 'news', 'connectors']);
+/* Derived from TABS rather than restated, because a hand-maintained copy
+   drifts silently: this list had already lost `brokerages`, so #brokerages
+   bounced to the overview and nobody noticed. `xray` is not in TABS — it is
+   pack-driven and appears only when the pack is installed — but it is still a
+   valid deep link when it is there. */
+const TAB_IDS = new Set([...TABS.map(entry => entry.id), 'xray', 'chat', 'actions']);
 
 export default function App() {
   // Tabs are deep-linkable via the URL hash (#xray, #briefings, …) so views
@@ -71,10 +226,71 @@ export default function App() {
     const fromHash = window.location.hash.replace('#', '');
     return TAB_IDS.has(fromHash) ? fromHash : 'overview';
   });
+  // Each tab switch is a history entry, so Back returns to the tab you came
+  // from. This used to replaceState unconditionally: the URL tracked the tab
+  // correctly but there was only ever one entry to go back from, so Back out
+  // of Holdings left the app entirely and landed on the marketing page.
+  //
+  // The first sync still replaces — on load the URL already describes the tab,
+  // and pushing there would add an entry whose Back goes nowhere visible.
+  // The transferred-shares gap opens a form rather than switching tabs; the
+  // key forces the panel to re-ask once a cost is recorded, so a gap that has
+  // just been closed does not sit there telling the reader to close it.
+  const [costGap, setCostGap] = useState(null);
+  // What the reader is here to upload, when Smart Import was opened from a gap
+  // card rather than from the menu.
+  const [importBrief, setImportBrief] = useState(null);
+  const openImportFor = useCallback(gap => {
+    setImportBrief(briefFor(gap));
+    setShowSmartImport(true);
+  }, []);
+  const [gapsKey, setGapsKey] = useState(0);
+  // Drives the nav badge, and whether the tab appears at all. A permanent
+  // "Actions (0)" is furniture; the point of the hub is that it is empty
+  // once the work is done.
+  const [openActions, setOpenActions] = useState(0);
   useEffect(() => {
-    window.history.replaceState(null, '', tab === 'overview' ? window.location.pathname : `#${tab}`);
+    let alive = true;
+    api('/api/v1/data-gaps')
+      .then(payload => { if (alive) setOpenActions((payload.gaps || []).length); })
+      .catch(() => { if (alive) setOpenActions(0); });
+    return () => { alive = false; };
+  }, [gapsKey]);
+
+  const firstTabSync = useRef(true);
+  useEffect(() => {
+    // Never while an auth fragment is still in flight. #setup / #reset /
+    // #auth_error are read from the live hash as a fallback, and rewriting it
+    // underneath them would strip a token mid sign-in.
+    if (/[#&](setup|reset|auth_error)=/.test(window.location.hash || '')) return;
+
+    const current = window.location.hash.replace('#', '') || 'overview';
+    if (current === tab) { firstTabSync.current = false; return; }
+    // Overview is the bare URL rather than #overview, but the query string
+    // stays: dropping it would discard whatever brought the reader here.
+    const target = tab === 'overview'
+      ? `${window.location.pathname}${window.location.search}`
+      : `#${tab}`;
+    if (firstTabSync.current) {
+      window.history.replaceState(null, '', target);
+      firstTabSync.current = false;
+    } else {
+      window.history.pushState(null, '', target);
+    }
   }, [tab]);
+
+  // Back and Forward move between tabs. Without this the URL would change and
+  // the view would not follow it.
+  useEffect(() => {
+    const onPop = () => {
+      const fromHash = window.location.hash.replace('#', '');
+      setTab(TAB_IDS.has(fromHash) ? fromHash : 'overview');
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
   const xray = useXray(); // pack-driven: absent → no tab, no teaser, no trace
+  const chat = useChat(); // same contract as the X-ray: no pack, no chat tab
   const [config, setConfig] = useState(null);
   const [portfolio, setPortfolio] = useState(null);
   const [positions, setPositions] = useState([]);
@@ -90,6 +306,15 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [locked, setLocked] = useState(false);
   const [account, setAccount] = useState(null); // { email } when signed in on a multiuser host
+  // Whether this deployment is self-host, confirmed positively rather than
+  // inferred from account being absent. Defaults to the hosted-safe branch:
+  // operator-only chrome (Connectors tab, data-source labels, AI provider
+  // name and cost, env-var setup instructions) stays hidden until self-host
+  // is actually confirmed by /api/v1/version, so a Cloud customer never sees
+  // it flash on screen while that request is still in flight. Self-hosters
+  // see the mirror-image: a brief delay before it appears, harmless on a
+  // private single-operator instance.
+  const [selfHost, setSelfHost] = useState(false);
 
   // App lock: any 401 flips the shell into the lock screen; a successful
   // login flips it back and reloads everything.
@@ -105,6 +330,7 @@ export default function App() {
   const probeAccount = useCallback(async () => {
     try {
       const info = await api('/api/v1/version');
+      setSelfHost(!info.multiuser);
       if (!info.multiuser) return;
       const me = await api('/api/auth/me');
       setAccount(me.authenticated && me.email
@@ -112,6 +338,8 @@ export default function App() {
         : null);
     } catch {
       setAccount(null);
+      // Leave selfHost as its hosted-safe default — a failed probe is not
+      // evidence either way, and the safer wrong guess is "hosted".
     }
   }, []);
   useEffect(() => { probeAccount(); }, [probeAccount]);
@@ -119,6 +347,9 @@ export default function App() {
   // The tab is also reachable by deep link (#connectors) — bounce hosted
   // accounts to the overview once the probe identifies them.
   useEffect(() => {
+    // Hosted accounts have no business configuring the server, so Connectors
+    // sends them back. Brokerages is deliberately not in this list: connecting
+    // your own account is the one thing on that screen that *is* theirs.
     if (account && tab === 'connectors') setTab('overview');
   }, [account, tab]);
 
@@ -207,6 +438,11 @@ export default function App() {
     setSchedule(sched);
     setBrokerStatus(broker);
     setPriceHistory(hist.history || {});
+    // The dashboard already holds a year of closes for every holding, to
+    // draw the sparklines. Seeding the chart cache with it means opening a
+    // position renders instantly instead of re-requesting, per symbol, data
+    // the page has already downloaded.
+    primeStockChartCache(hist.history || {}, '1y');
     setLoaded(true);
   }, []);
 
@@ -313,8 +549,10 @@ export default function App() {
     try {
       await api('/api/tax-lots', { method: 'POST', body: JSON.stringify(body) });
       await loadAll();
+      return true;
     } catch (error) {
       addToast('error', error.message);
+      return false;
     } finally {
       setBusy('');
     }
@@ -512,13 +750,12 @@ export default function App() {
     let prevTotal = 0;
     let tracked = 0;
     positions.forEach(position => {
-      if (['cash', 'option'].includes(position.asset_type)) return;
-      const closes = priceHistory[position.symbol]?.closes;
-      if (!closes || closes.length < 2) return;
-      const last = closes[closes.length - 1];
-      const prev = closes[closes.length - 2];
-      change += (last - prev) * position.quantity;
-      prevTotal += prev * position.quantity;
+      // One day-change rule for the whole app — the card, the table's DAY
+      // column and the stock cards must never disagree about "today".
+      const day = dayChangeFor(position, priceHistory);
+      if (!day) return;
+      change += day.value;
+      prevTotal += day.prevValue;
       tracked += 1;
     });
     if (!tracked) return null;
@@ -544,6 +781,31 @@ export default function App() {
 
   const runningBriefing = briefings.some(item => item.status === 'running');
   const gainTone = (portfolio?.total_gain || 0) >= 0 ? 'positive' : 'negative';
+  const perf = usePortfolioReturn(portfolio?.last_refresh || 0);
+  // TWR, not MWR: it is what brokers report, and what the customer will be
+  // holding Serin up against.
+  //
+  // Shown only where the ledger can support it. The two exclusions are the
+  // point of the card, not caveats to it:
+  //   holdings_only         — no transactions at all, so the "return" is just
+  //                           today's basket priced backwards. That is the
+  //                           counterfactual this card exists to stop leading
+  //                           with; showing it here would reintroduce the bug
+  //                           under a more confident label.
+  //   missing_cash_activity — trades recorded but no deposits or withdrawals.
+  //                           A time-weighted return has to divide external
+  //                           flows out; without them a deposit reads as
+  //                           performance, which inflates rather than errs.
+  // Both fall back to unrealized gain, which is at least honestly what it is.
+  const RETURN_OK = ['complete', 'partial'];
+  const returnPct = perf?.available && RETURN_OK.includes(perf.coverage?.quality)
+    ? perf.twr_pct ?? null
+    : null;
+  // The date the return is measured from, which is where the *price series*
+  // begins — not coverage.since, which is where the ledger begins. A ledger
+  // reaching back to 2016 beside a year of daily closes produced "+75.08%
+  // portfolio return since 2016-06-09" for a figure covering twelve months.
+  const returnSince = perf?.returns?.all?.from || '';
   const hasPositions = positions.length > 0;
 
   if (locked) {
@@ -565,8 +827,61 @@ export default function App() {
   const trialEndsSoon = account?.status === 'trialing'
     && account.trialDaysLeft != null && account.trialDaysLeft <= 3;
 
+  // Both pack features hang off Briefing: X-ray before it, Chat after. Built
+  // as one list rather than two early returns, which silently dropped Chat
+  // whenever X-ray was also installed.
+  const sectionTabs = TABS.flatMap(item => {
+    if (item.id !== 'briefings') return [item];
+    return [
+      ...(xray.status === 'ok' ? [{ id: 'xray', label: 'X-ray' }] : []),
+      item,
+      ...(chat.status === 'ok' ? [{ id: 'chat', label: 'Chat' }] : []),
+    ];
+  }).filter(item => item.id !== 'connectors' || selfHost)
+;
+  const [pageTitle, pageSubtitle] = PAGE_META[tab] || PAGE_META.overview;
+  const overviewDate = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  }).format(new Date());
+
   return (
-    <div className="app-container">
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <div>
+          <h1 className="brand sidebar-brand"><span>serin</span><BrandMark /></h1>
+          <span className="instance-chip"><i />{selfHost ? 'Local' : 'Cloud'}</span>
+        </div>
+        <nav className="sidebar-nav" aria-label="Sections">
+          {sectionTabs.map(item => (
+            <button
+              key={item.id}
+              className={tab === item.id ? 'active' : ''}
+              onClick={() => setTab(item.id)}
+            >
+              <NavIcon id={item.id} />
+              <span>{item.label}</span>
+              {item.id === 'xray' && xray.data?.entitled && (xray.data.flags?.length || 0) > 0 && (
+                <span className="sidebar-count">{xray.data.flags.length}</span>
+              )}
+              {item.id === 'actions' && item.badge > 0 && (
+                <span className="sidebar-count">{item.badge}</span>
+              )}
+              {item.id === 'briefings' && runningBriefing && <span className="runningdot">●</span>}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-foot">
+          <div className="sidebar-profile">
+            <span className="profile-avatar">{(account?.email || 'Serin').slice(0, 2).toUpperCase()}</span>
+            <span>{account?.email || (selfHost ? 'Local instance' : 'Serin Cloud')}</span>
+          </div>
+          {account && (
+            <button className="sidebar-signout" onClick={signOut}><IconSignOut size={16} /> Log out</button>
+          )}
+        </div>
+      </aside>
+
+      <main className="app-container app-main">
       {trialEndsSoon && !trialNoticeDismissed && (
         <div className="notice-banner trial" role="status">
           <span>
@@ -593,54 +908,39 @@ export default function App() {
           </div>
         </div>
       )}
-      <header className="header">
-        <div className="header-left">
-          <h1 className="brand"><BrandMark /><span>serin</span></h1>
-          <span className={`subtitle prices-as-of ${busy === 'prices' ? 'is-refreshing' : ''}`}>
-            {busy === 'prices'
-              ? '· refreshing prices…'
-              : portfolio?.last_refresh
-                ? `· ${dateShort(portfolio.last_refresh)}`
-                // "local" is the self-host privacy brag; a signed-in Cloud
-                // account is by definition not local.
-                : account ? '· portfolio intelligence' : '· local portfolio intelligence'}
-          </span>
+      <header className="page-header">
+        <div className="page-heading">
+          <h2>{pageTitle}</h2>
+          <p>{tab === 'overview' ? overviewDate : pageSubtitle}</p>
         </div>
-        <nav className="tab-nav" aria-label="Sections">
-          {TABS.flatMap(item => (
-            // The X-ray tab slots in after Stocks, and only when the pack answers.
-            item.id === 'briefings' && xray.status === 'ok'
-              ? [{ id: 'xray', label: 'X-ray' }, item]
-              : [item]
-          )).filter(item => (
-            // Hosted accounts get no Connectors tab: market data and AI are
-            // part of what they pay for, and the page under it is operator
-            // plumbing — env-managed keys and instance toggles the API
-            // (rightly) refuses to save for them.
-            item.id !== 'connectors' || !account
-          )).map(item => (
-            <button
-              key={item.id}
-              className={`${tab === item.id ? 'active' : ''} ${item.id === 'connectors' ? 'hero' : ''}`}
-              onClick={() => setTab(item.id)}
-            >
-              {item.label}
-              {item.id === 'overview' && hasPositions && <span className="tab-count">{positions.length}</span>}
-              {item.id === 'xray' && xray.data?.entitled && (xray.data.flags?.length || 0) > 0 && (
-                <span className="tab-count warn">{xray.data.flags.length}</span>
-              )}
-              {item.id === 'briefings' && runningBriefing && <span className="runningdot">●</span>}
-            </button>
-          ))}
-        </nav>
         <div className="header-actions">
-          <select
-            className="currency-select"
-            title="Display currency — totals convert to this"
-            aria-label="Display currency"
-            value={config?.display_currency || 'USD'}
-            onChange={async event => {
-              const currency = event.target.value;
+          {/* Four full-width controls rode every tab, and after onboarding
+              most of them are not what anyone came for. What survives at full
+              size is the one thing that is always urgent (something needs
+              doing) and the one that is always wanted (add a holding). The
+              rest moved behind a menu. */}
+          <button
+            className={`icon-btn bell${openActions > 0 ? ' has-alerts' : ''}`}
+            onClick={() => setTab('actions')}
+            aria-label={openActions > 0
+              ? `${openActions} things need attention`
+              : 'Nothing needs attention'}
+            title={openActions > 0
+              ? `${openActions} things need attention`
+              : 'Nothing needs attention'}
+          >
+            <IconBell />
+            {openActions > 0 && <span className="bell-count">{openActions}</span>}
+          </button>
+          <button className="icon-btn" onClick={refreshPrices}
+                  disabled={busy === 'prices' || !hasPositions}
+                  aria-label="Refresh prices"
+                  title={busy === 'prices' ? 'Refreshing…' : 'Refresh prices'}>
+            <IconRefresh />
+          </button>
+          <HeaderMenu
+            currency={config?.display_currency || 'USD'}
+            onCurrency={async currency => {
               try {
                 await api('/api/settings/display-currency', { method: 'PUT', body: JSON.stringify({ currency }) });
                 setDisplayCurrency(currency);
@@ -649,16 +949,11 @@ export default function App() {
                 addToast('error', error.message);
               }
             }}
-          >
-            {COMMON_CURRENCIES.map(code => <option key={code} value={code}>{code}</option>)}
-          </select>
-          <button className="btn" onClick={refreshPrices} disabled={busy === 'prices' || !hasPositions}>
-            <IconRefresh /> {busy === 'prices' ? 'Refreshing…' : 'Refresh'}
+            onSmartImport={() => setShowSmartImport(true)}
+          />
+          <button className="btn btn-primary" onClick={() => setModal({ mode: 'add' })}>
+            <IconPlus /> <span className="btn-label">Add position</span>
           </button>
-          <button className="btn" onClick={() => setShowSmartImport(true)}>
-            <IconUpload /> Smart Import
-          </button>
-          <button className="btn btn-primary" onClick={() => setModal({ mode: 'add' })}><IconPlus /> Add position</button>
           {account?.status === 'trialing' && account.trialDaysLeft != null && (
             <button
               className="trial-chip"
@@ -668,29 +963,30 @@ export default function App() {
               Trial · {account.trialDaysLeft}d left
             </button>
           )}
-          {account && (
-            <button
-              className="icon-btn"
-              onClick={signOut}
-              title={`Signed in as ${account.email} — sign out`}
-              aria-label={`Sign out (${account.email})`}
-            >
-              <IconSignOut size={16} />
-            </button>
-          )}
         </div>
       </header>
 
       {tab === 'overview' && (
         <>
           <section className="stats-grid">
-            <StatCard label="Total Value" value={money(portfolio?.total_value)} sub={`${positions.length} positions · ${money(portfolio?.cash_value)} cash`} />
             <StatCard
-              label="Total Gain"
-              value={signedMoney(portfolio?.total_gain)}
-              valueClass={gainTone}
-              sub={signedPct(portfolio?.total_gain_pct)}
-              subClass={gainTone}
+              label="Total portfolio"
+              value={money(portfolio?.total_value)}
+              // The return leads; unrealized gain moves to the meta line. It is
+              // still worth showing — it is what today's holdings are up — but
+              // it is a detail of the portfolio, not a measure of how it did.
+              sub={
+                returnPct != null
+                  ? `${signedPct(returnPct)} portfolio return${returnSince ? ` since ${returnSince}` : ''}`
+                  : `${signedMoney(portfolio?.total_gain)} total gain`
+              }
+              subClass={returnPct != null ? (returnPct >= 0 ? 'positive' : 'negative') : gainTone}
+              meta={
+                returnPct != null
+                  ? `${positions.length} positions · ${signedMoney(portfolio?.total_gain)} unrealized`
+                  : `${positions.length} positions`
+              }
+              bird
             />
             <StatCard
               label="Day Change"
@@ -699,16 +995,24 @@ export default function App() {
               sub={dayChange ? `${signedPct(dayChange.pct)} · ${dayChange.tracked} tracked` : 'refresh prices to track'}
               subClass={dayChange ? (dayChange.value >= 0 ? 'positive' : 'negative') : ''}
             />
-            <StatCard label="Invested Capital" value={money(portfolio?.total_cost)} sub={`cost basis ex-cash`} />
+            <StatCard label="Invested" value={money(portfolio?.total_cost)} sub="Cost basis (ex-cash)" />
+            <StatCard label="Cash" value={money(portfolio?.cash_value)} sub="Available to invest" />
           </section>
 
           {hasPositions ? (
             <>
+              {/* Above the chart it explains, not below it. Someone who has
+                  just read a number they distrust should not have to scroll to
+                  find out why. */}
+              <DataGaps onGoTo={setTab} onRecordCost={setCostGap}
+                        onImportStatement={openImportFor}
+                        refreshKey={gapsKey} />
               <PortfolioTrendChart
                 positions={positions}
                 priceHistory={priceHistory}
                 dateRange={dateRange}
                 onRangeChange={setDateRange}
+                ledger={perf}
               />
               <div className="overview-grid">
                 <div className="main-col">
@@ -733,21 +1037,12 @@ export default function App() {
                     audit={auditReport}
                     onEdit={position => setModal({ mode: 'edit', position })}
                     onOpenTaxLots={position => setTaxDrawerId(position.id)}
+                    onDelete={position => setConfirming({ kind: 'position', item: position })}
+                    showSource={selfHost}
                   />
                   <AllocationCard portfolio={portfolio} />
                   <TopHoldings positions={positions} total={portfolio?.total_value || 0} onSelect={setSelectedPositionId} />
                   <XrayTeaser xray={xray} onOpen={() => setTab('xray')} />
-                  {(config?.snaptrade_configured || (brokerStatus?.connections?.length > 0)) && (
-                    <ConnectionsPanel
-                      status={brokerStatus}
-                      configured={Boolean(config?.snaptrade_configured)}
-                      busy={busy}
-                      onConnect={connectBroker}
-                      onSync={syncBroker}
-                      onBackfill={backfillBroker}
-                      onDisconnect={disconnectBroker}
-                    />
-                  )}
                 </div>
               </div>
             </>
@@ -782,6 +1077,8 @@ export default function App() {
 
       {tab === 'xray' && <XrayView xray={xray} />}
 
+      {tab === 'chat' && <ChatView chat={chat} />}
+
       {tab === 'stocks' && (
         <section className="stocks-tab">
           {stockDetail ? (
@@ -789,6 +1086,7 @@ export default function App() {
               symbol={stockDetail.symbol}
               assetType={stockDetail.assetType}
               onClose={() => setStockDetail(null)}
+              hosted={!selfHost}
             />
           ) : (
             <>
@@ -819,6 +1117,7 @@ export default function App() {
           onSavePreferences={saveBriefingPreferences}
           schedule={schedule}
           onSaveSchedule={saveSchedule}
+          hosted={!selfHost}
         />
       )}
 
@@ -826,21 +1125,64 @@ export default function App() {
         <NewsView news={news} loading={newsLoading} onRefresh={refreshNews} />
       )}
 
-      {tab === 'connectors' && (
-        <ConnectorsView
+      {tab === 'transactions' && (
+        <TransactionsView
           addToast={addToast}
           onChanged={() => loadAll().catch(error => addToast('error', error.message))}
         />
       )}
 
+      {tab === 'actions' && (
+        <ActionHub
+          refreshKey={gapsKey}
+          onGoTo={setTab}
+          onRecordCost={setCostGap}
+          onImportStatement={openImportFor}
+          onChanged={() => setGapsKey(key => key + 1)}
+        />
+      )}
+
+      {tab === 'brokerages' && (
+        <Brokerages
+          onError={message => addToast('error', message)}
+          onChanged={() => loadAll().catch(error => addToast('error', error.message))}
+          onViewTransactions={() => setTab('transactions')}
+        />
+      )}
+
+      {tab === 'connectors' && (
+        <>
+          <ConnectorsView
+            addToast={addToast}
+            onChanged={() => loadAll().catch(error => addToast('error', error.message))}
+          />
+          {/* Agent access sits with the connectors because it is one: the
+              data layer, pointed outwards at an assistant instead of inwards
+              at a provider. */}
+          <AgentAccess addToast={addToast} />
+        </>
+      )}
+
       <footer className="footer-note">
         <span>Serin · AI portfolio intelligence</span>
-        <span>Context &amp; organization — not investment advice</span>
+        {/* The public footer carries these for someone deciding whether to
+            pay. Inside the app they earn their place for a different reason:
+            a subscriber who needs support, or the terms they are billed
+            under, should not have to leave for the marketing site to find
+            them — and App Review looks for exactly this. Core serves these
+            routes, so they resolve on a self-hosted box too. */}
+        <nav className="footer-links">
+          <a href="/contact">Contact</a>
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+        </nav>
+        <span>Context &amp; organization — never trade directives</span>
       </footer>
 
       {modal && (
         <PositionModal
           editing={modal.mode === 'edit' ? modal.position : null}
+          brokers={[...new Set(positions.map(position => position.broker).filter(Boolean))]}
           busy={busy === 'position'}
           onClose={() => setModal(null)}
           onSubmit={submitPosition}
@@ -873,10 +1215,25 @@ export default function App() {
 
       {showSmartImport && (
         <SmartImport
-          onClose={() => setShowSmartImport(false)}
-          onImported={loadAll}
+          onClose={() => { setShowSmartImport(false); setImportBrief(null); }}
+          onImported={() => { setGapsKey(key => key + 1); return loadAll(); }}
           addToast={addToast}
+          brief={importBrief}
           brokers={[...new Set(positions.map(p => p.broker).filter(Boolean))]}
+        />
+      )}
+
+      {/* Opened from the gap panel with symbol, account, date and quantity
+          already in it, so the only thing left is the price. */}
+      {costGap && (
+        <CostBasisForm
+          gap={costGap}
+          addToast={addToast}
+          onClose={() => setCostGap(null)}
+          onSaved={() => {
+            setGapsKey(key => key + 1);      // the gap it just closed
+            loadAll().catch(error => addToast('error', error.message));
+          }}
         />
       )}
 
@@ -889,6 +1246,7 @@ export default function App() {
           ))}
         </div>
       )}
+      </main>
     </div>
   );
 }
@@ -1037,7 +1395,14 @@ function LockScreen({ onUnlocked }) {
   return (
     <div className="lock-screen">
       <form className="lock-card" onSubmit={submit}>
-        <h1 className="brand"><BrandMark /><span>serin</span></h1>
+        {/* The wordmark is the escape hatch every visitor reaches for first,
+            and here it was inert — someone who landed on this card with no
+            account had only the back button. On a hosted deployment "/" is
+            the public site; a self-host build redirects it to the app, which
+            is the right destination there too. */}
+        <a className="brand lock-home" href="/" aria-label="Serin home">
+          <BrandMark /><span>serin</span>
+        </a>
         <p className="lock-hint">{hint}</p>
         {multiuser && !chooseNew && authOpts.google && (
           <>
@@ -1127,8 +1492,14 @@ function LockScreen({ onUnlocked }) {
         {/* Strangers reach this screen from the public site's CTA with no
             credentials and no way out but the back button. Deep-link the
             pricing section, not "/" — the bare landing reads as a dead end
-            when what a newcomer wants is the way in. */}
-        <a className="lock-out" href="/#pricing">New here? What Serin is, and the free trial →</a>
+            when what a newcomer wants is the way in.
+
+            Hosted only: a self-hosted instance has no marketing page and no
+            trial, so this offered its owner a pitch for a product they are
+            already running, on a link that lands back on this same screen. */}
+        {multiuser && !chooseNew && (
+          <a className="lock-out" href="/#pricing">New here? What Serin is, and the free trial →</a>
+        )}
       </form>
     </div>
   );

@@ -66,19 +66,11 @@ def test_send_with_no_tokens_is_a_noop(fresh, monkeypatch):
     assert push.send_briefing_ready() == 0
 
 
-def test_pairing_endpoint_payload(fresh, monkeypatch):
-    from backend.config import settings
-
-    monkeypatch.setattr(settings, "auth_password", "")
+def test_pairing_endpoint_is_gone(fresh):
+    """QR pairing existed so the phone could point at a self-hosted box. The
+    app is Cloud-only now, so the endpoint has no caller — and it handed out a
+    session token to anyone who could reach it, which is a thing worth being
+    sure has actually gone rather than merely stopped being linked."""
     client = TestClient(app)
-    payload = client.get("/api/pairing").json()
-    assert payload["serin"] == 1
-    assert payload["url"].startswith("http")
-    assert payload["auth_enabled"] is False
-    assert payload["token"] == ""
-
-    monkeypatch.setattr(settings, "auth_password", "hunter2")
-    login = client.post("/api/auth/login", json={"password": "hunter2"})
-    paired = client.get("/api/pairing").json()
-    assert paired["auth_enabled"] is True
-    assert paired["token"] == login.json()["token"]
+    body = client.get("/api/pairing").text
+    assert '"serin"' not in body and '"token"' not in body

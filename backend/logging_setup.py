@@ -12,6 +12,8 @@ import json
 import logging
 from datetime import UTC, datetime
 
+from backend.redaction import RedactingFilter
+
 _STANDARD_ATTRS = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
     "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
@@ -49,8 +51,14 @@ def configure_logging(log_format: str = "text") -> None:
         formatter = JsonFormatter()
     else:
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Attached to handlers rather than to a logger, so it applies to every
+    # record regardless of which library emitted it. The FMP key reached the
+    # log as a substring of an httpx exception repr — nobody logged a secret
+    # on purpose, and nobody will next time either.
+    redactor = RedactingFilter()
     for handler in handlers:
         handler.setFormatter(formatter)
+        handler.addFilter(redactor)
     root.setLevel(logging.INFO)
     # httpx logs every request URL at INFO — and providers that authenticate
     # via query string (FMP) would put their API key in the log with it.

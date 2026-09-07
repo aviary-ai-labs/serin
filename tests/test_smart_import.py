@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 from backend import db, main, smart_import
 from fastapi.testclient import TestClient
 
@@ -64,6 +66,53 @@ def test_normalize_clamps_negative_numbers():
     assert row["average_cost"] == 0.0
 
 
+def test_normalize_tax_lot_screenshot_as_one_holding_with_three_lots():
+    """The Fidelity tax-lot screenshot must not become four NFLX positions."""
+    rows = smart_import._normalize_positions({
+        "positions": [
+            {
+                "symbol": "NFLX",
+                "name": "Netflix Inc.",
+                "broker": "fidelity",
+                "quantity": 650,
+                "average_cost": 87.90,
+                "current_price": 80.22,
+                "asset_type": "stock",
+                "tax_lots": [
+                    {"quantity": 300, "cost_basis": 95.00, "acquired_at": "12/18/25"},
+                    {"quantity": 200, "cost_basis": 83.18, "acquired_at": "01/21/26"},
+                    {"quantity": 150, "cost_basis": 80.00, "acquired_at": "02/03/26"},
+                ],
+            }
+        ]
+    })
+    assert len(rows) == 1
+    assert rows[0]["quantity"] == 650
+    assert rows[0]["average_cost"] == 87.90
+    assert rows[0]["current_price"] == 80.22
+    assert rows[0]["tax_lots"] == [
+        {"quantity": 300, "cost_basis": 95, "acquired_at": "2025-12-18"},
+        {"quantity": 200, "cost_basis": 83.18, "acquired_at": "2026-01-21"},
+        {"quantity": 150, "cost_basis": 80, "acquired_at": "2026-02-03"},
+    ]
+    assert smart_import._row_warnings(rows[0], set()) == []
+
+
+def test_legacy_tax_lot_rows_collapse_under_aggregate_position():
+    """Tolerate providers that still emit the dated rows as positions."""
+    rows = smart_import._normalize_positions({
+        "positions": [
+            {"symbol": "NFLX", "broker": "fidelity", "quantity": 650, "average_cost": 87.9},
+            {"symbol": "NFLX", "broker": "fidelity", "quantity": 300, "average_cost": 95, "acquired_at": "12/18/25"},
+            {"symbol": "NFLX", "broker": "fidelity", "quantity": 200, "average_cost": 83.18, "acquired_at": "01/21/26"},
+            {"symbol": "NFLX", "broker": "fidelity", "quantity": 150, "average_cost": 80, "acquired_at": "02/03/26"},
+        ]
+    })
+    assert len(rows) == 1
+    assert rows[0]["quantity"] == 650
+    assert [lot["quantity"] for lot in rows[0]["tax_lots"]] == [300, 200, 150]
+
+
 # --- deterministic warnings ------------------------------------------------
 
 def test_warnings_flag_zero_quantity():
@@ -92,6 +141,19 @@ def test_cash_rows_skip_quantity_warnings():
     })
     warnings = smart_import._row_warnings(row, existing_keys=set())
     assert warnings == []  # high cash balance is fine
+
+
+def test_warnings_flag_tax_lot_quantity_mismatch():
+    row = smart_import._normalize_row({
+        "symbol": "NFLX",
+        "quantity": 650,
+        "tax_lots": [
+            {"quantity": 300, "cost_basis": 95, "acquired_at": "2025-12-18"},
+            {"quantity": 200, "cost_basis": 83.18, "acquired_at": "2026-01-21"},
+        ],
+    })
+    warnings = smart_import._row_warnings(row, existing_keys=set())
+    assert any("tax lots total 500 shares" in warning for warning in warnings)
 
 
 # --- bulk insert -----------------------------------------------------------
@@ -145,6 +207,55 @@ def test_bulk_insert_rejects_invalid_rows(tmp_path):
     assert db.list_positions()[0].symbol == "GOOD"
 
 
+def test_bulk_insert_creates_tax_lots_with_position(tmp_path):
+    _fresh(tmp_path)
+    result = smart_import.bulk_insert([{
+        "symbol": "NFLX",
+        "name": "Netflix Inc.",
+        "broker": "fidelity",
+        "asset_type": "stock",
+        "quantity": 650,
+        "average_cost": 87.90,
+        "current_price": 80.22,
+        "tax_lots": [
+            {"quantity": 300, "cost_basis": 95.00, "acquired_at": "2025-12-18"},
+            {"quantity": 200, "cost_basis": 83.18, "acquired_at": "2026-01-21"},
+            {"quantity": 150, "cost_basis": 80.00, "acquired_at": "2026-02-03"},
+        ],
+    }])
+    assert result["inserted"] == 1
+    assert result["tax_lots_inserted"] == 3
+    assert result["tax_lots_skipped"] == 0
+    lots = db.list_tax_lots(symbol="NFLX", broker="fidelity")
+    assert {(lot.acquired_at, lot.quantity, lot.cost_basis) for lot in lots} == {
+        ("2025-12-18", 300, 95),
+        ("2026-01-21", 200, 83.18),
+        ("2026-02-03", 150, 80),
+    }
+
+
+def test_bulk_insert_adds_new_lots_to_existing_position_without_replacing(tmp_path):
+    _fresh(tmp_path)
+    smart_import.bulk_insert([{
+        "symbol": "NFLX", "broker": "fidelity", "quantity": 650, "average_cost": 87.9,
+    }])
+    row = {
+        "symbol": "NFLX",
+        "broker": "fidelity",
+        "quantity": 650,
+        "average_cost": 87.9,
+        "tax_lots": [{"quantity": 300, "cost_basis": 95, "acquired_at": "2025-12-18"}],
+    }
+    first = smart_import.bulk_insert([row])
+    second = smart_import.bulk_insert([row])
+    assert first["inserted"] == 0
+    assert first["skipped"] == 1
+    assert first["tax_lots_inserted"] == 1
+    assert second["tax_lots_inserted"] == 0
+    assert second["tax_lots_skipped"] == 1
+    assert len(db.list_tax_lots(symbol="NFLX", broker="fidelity")) == 1
+
+
 # --- API surface (no LLM call — we mock smart_import.extract) -------------
 
 def test_bulk_endpoint(tmp_path):
@@ -183,9 +294,8 @@ def test_extract_endpoint_routes_through_smart_import(tmp_path, monkeypatch):
             ],
             "row_count": 1,
             "notes": "",
-            "provider": "deepseek",
-            "model": "deepseek-v4-flash",
-            "cost_usd": 0.0009,
+            "transactions": [],
+            "transaction_count": 0,
             "notice": "Test provider notice",
         }
 
@@ -199,10 +309,86 @@ def test_extract_endpoint_routes_through_smart_import(tmp_path, monkeypatch):
     body = r.json()
     assert body["row_count"] == 1
     assert body["rows"][0]["symbol"] == "AAPL"
-    assert body["model"] == "deepseek-v4-flash"
+    # Model, provider and cost are deliberately absent: the import screen is
+    # for reviewing what was read out of a statement, not model telemetry.
+    assert "model" not in body
+    assert "provider" not in body
+    assert "cost_usd" not in body
 
 
 def test_extract_endpoint_requires_input():
     client = TestClient(main.app)
     r = client.post("/api/import/extract")
     assert r.status_code == 400
+
+
+def test_extract_endpoint_accepts_json_file_fallback(tmp_path, monkeypatch):
+    """Mobile Safari's multipart fallback must reach extraction with the
+    original bytes, MIME type, filename-derived image classification, and hint."""
+    _fresh(tmp_path)
+    captured = {}
+
+    async def fake_extract(**kwargs):
+        captured.update(kwargs)
+        return {"rows": [], "row_count": 0, "provider": "test", "model": "test", "cost_usd": 0}
+
+    monkeypatch.setattr(smart_import, "extract", fake_extract)
+    image = b"\xff\xd8\xff\xe0fake-jpeg"
+    client = TestClient(main.app)
+    r = client.post(
+        "/api/v1/import/extract",
+        json={
+            "filename": "tax-lots.jpg",
+            "content_type": "image/jpeg",
+            "file_base64": base64.b64encode(image).decode("ascii"),
+            "hint": "broker: Fidelity",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert captured["image_bytes"] == image
+    assert captured["image_mime"] == "image/jpeg"
+    assert captured["hint"] == "broker: Fidelity"
+    assert captured["text"] is None
+
+
+def test_extract_endpoint_rejects_invalid_json_file():
+    client = TestClient(main.app)
+    r = client.post(
+        "/api/v1/import/extract",
+        json={"filename": "broken.png", "content_type": "image/png", "file_base64": "not-base64!"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Could not decode the uploaded file."
+
+
+def test_bulk_insert_reprices_from_the_quote_cache(tmp_path):
+    """A statement is authoritative about holdings, never about today's
+    price — imported rows must immediately pick up the freshest known quote
+    (the real case: a screenshot's months-old prices sat on the rows until
+    someone happened to press Refresh)."""
+    _fresh(tmp_path)
+    db.cache_quotes([("HOOD", "stock", 95.56, "Financial Services")])
+    result = smart_import.bulk_insert(
+        [{"symbol": "HOOD", "quantity": 388, "average_cost": 117, "current_price": 69.36}]
+    )
+    assert result["refreshed"] == 1
+    position = next(p for p in db.list_positions() if p.symbol == "HOOD")
+    assert position.current_price == 95.56
+
+
+def test_bulk_insert_survives_a_failing_price_refresh(tmp_path, monkeypatch):
+    """Pricing is a courtesy on top of the import — its failure must never
+    fail the commit that just succeeded."""
+    from backend import prices
+
+    _fresh(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(prices, "refresh_prices", boom)
+    result = smart_import.bulk_insert(
+        [{"symbol": "AAPL", "quantity": 10, "average_cost": 170, "current_price": 150}]
+    )
+    assert result["inserted"] == 1
+    assert result["refreshed"] == 0

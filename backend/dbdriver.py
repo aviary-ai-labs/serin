@@ -5,7 +5,7 @@ most of why ``docker compose up`` is the whole install. A shared deployment
 needs real concurrency and, more importantly, row-level security as a second
 line of defence under the scoping in :mod:`backend.scope`.
 
-The queries stay **raw SQL** — no ORM. Only three things actually differ, and
+The queries stay **raw SQL** — no ORM. Only four things actually differ, and
 they are contained here:
 
 * **placeholders** — SQLite writes ``?``, psycopg writes ``%s``
@@ -13,6 +13,8 @@ they are contained here:
   ``RETURNING id``
 * **DDL dialect** — ``AUTOINCREMENT`` vs ``GENERATED … AS IDENTITY``, and
   ``PRAGMA`` is SQLite-only
+* **connection cost** — opening a SQLite file is free, opening a Postgres
+  connection is a TLS handshake, so the Postgres side is pooled
 
 Select with ``SERIN_DATABASE_URL``: unset (or ``sqlite://``) keeps SQLite; a
 ``postgresql://…`` URL switches drivers. Nothing else in the codebase needs to
@@ -24,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -99,6 +102,22 @@ class _PgConnection:
         cur.execute(to_pg(sql), tuple(params) if params else None)
         return _PgCursor(cur)
 
+    def executemany(self, sql: str, seq_of_params: Any) -> _PgCursor:
+        """The batched form, which db.cache_quotes needs and Postgres would
+        otherwise refuse.
+
+        Absent, a caller that batches falls over with AttributeError at
+        runtime and only on Postgres — SQLite has always had this, so the
+        quote sweep passed every local test and then failed on every sweep in
+        production. Anything sqlite3.Connection offers and this does not is a
+        bug waiting for the deployment that uses it.
+        """
+        cur = self._conn.cursor()
+        rows = [tuple(params) for params in seq_of_params]
+        if rows:
+            cur.executemany(to_pg(sql), rows)
+        return _PgCursor(cur)
+
     def executescript(self, script: str) -> None:
         with self._conn.cursor() as cur:
             cur.execute(script)
@@ -108,6 +127,95 @@ class _PgConnection:
 
     def close(self) -> None:
         self._conn.close()
+
+
+# --- the Postgres connection pool ------------------------------------------
+
+# Every checkout used to open its own connection and close it again. On SQLite
+# that is a file handle; on Postgres it is a TCP connect, a TLS handshake and a
+# pgbouncer auth lookup — roughly 4 KB of egress to read one row. The scheduler
+# wakes every 30s and each pass reads a couple of dozen settings, so a single
+# idle account was opening ~72,000 connections a day and spending ~7.9 GB a
+# month on handshakes against a 27 MB database. Pooling makes that a startup
+# cost instead of a per-query one; nothing above this module changes.
+
+_POOL: Any = None
+_POOL_URL: str = ""
+_POOL_LOCK = threading.Lock()
+
+# Session mode holds one server-side backend per pooled connection, so this is
+# a real reservation against the database's connection limit, not just a local
+# cache. One process serving a web app and the scheduler needs very few.
+_DEFAULT_POOL_MAX = 5
+
+
+def _pool_max_size() -> int:
+    try:
+        return max(1, int(os.environ.get("SERIN_DB_POOL_MAX", "")))
+    except ValueError:
+        return _DEFAULT_POOL_MAX
+
+
+def _clear_scope(conn: Any) -> None:
+    """Unbind the scope before a connection goes back to the pool.
+
+    ``db.connect`` rebinds on every checkout, so on the paths that exist today
+    this is belt to that braces. It is still worth the round trip: the policies
+    read ``serin.user_id``, and a pooled connection is the first thing here
+    that can *outlive* a request. Without this, a future caller that reached a
+    connection without binding would inherit whoever used it last and read
+    their rows; with it, that caller reads nothing. Empty is as fail-closed as
+    unset — no real ``user_id`` equals ``''``.
+    """
+    conn.execute("SELECT set_config('serin.user_id', '', false)")
+
+
+def _get_pool() -> Any:
+    """The process-wide pool for the current ``SERIN_DATABASE_URL``.
+
+    Keyed on the URL: a test that repoints the env, or a deploy that moves the
+    database, builds a new pool instead of quietly serving connections to the
+    old one.
+    """
+    global _POOL, _POOL_URL
+    url = database_url()
+    with _POOL_LOCK:
+        if _POOL is not None and _POOL_URL == url:
+            return _POOL
+        if _POOL is not None:
+            _POOL.close()
+            _POOL, _POOL_URL = None, ""
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        pool = ConnectionPool(
+            url,
+            kwargs={"row_factory": dict_row, "autocommit": True},
+            min_size=1,
+            max_size=_pool_max_size(),
+            # Managed Postgres hangs up connections that idle too long, and a
+            # pool is mostly idle by design. Check on checkout so a dead one is
+            # replaced here rather than surfacing as a failed request, and cap
+            # the lifetime so connections are recycled before that happens.
+            check=ConnectionPool.check_connection,
+            max_idle=300,
+            max_lifetime=1800,
+            reset=_clear_scope,
+            timeout=30,
+            name="serin",
+            open=True,
+        )
+        _POOL, _POOL_URL = pool, url
+        return pool
+
+
+def close_pool() -> None:
+    """Drop the pool and every connection in it (shutdown, and between tests)."""
+    global _POOL, _POOL_URL
+    with _POOL_LOCK:
+        if _POOL is not None:
+            _POOL.close()
+        _POOL, _POOL_URL = None, ""
 
 
 @contextmanager
@@ -127,14 +235,8 @@ def connect(sqlite_path: Path) -> Iterator[Any]:
             conn.close()
         return
 
-    import psycopg
-    from psycopg.rows import dict_row
-
-    raw = psycopg.connect(database_url(), row_factory=dict_row, autocommit=True)
-    try:
+    with _get_pool().connection() as raw:
         yield _PgConnection(raw)
-    finally:
-        raw.close()
 
 
 def insert_returning_id(conn: Any, sql: str, params: Any) -> int:

@@ -46,6 +46,9 @@ def fmp(monkeypatch):
     calls: list[str] = []
 
     def fake_get(path, params, *args, **kwargs):
+        if path == "stable/quote":
+            return [{"symbol": s, "price": 0.0}
+                    for s in str(params.get("symbol", "")).split(",") if s], None
         if path == "stable/profile":
             calls.append(params["symbol"])
             return [{"price": 212.5, "sector": "Technology"}], None
@@ -235,6 +238,9 @@ def test_history_sweep_tops_up_and_then_stands_down(fresh_db, monkeypatch):
     today = datetime.now(UTC).date()
 
     def fake_get(path, params, *args, **kwargs):
+        if path == "stable/quote":
+            return [{"symbol": s, "price": 0.0}
+                    for s in str(params.get("symbol", "")).split(",") if s], None
         if path == "stable/profile":
             return [{"price": 212.5, "sector": "Technology"}], None
         if path == "stable/historical-price-eod/light":
@@ -259,3 +265,46 @@ def test_history_sweep_tops_up_and_then_stands_down(fresh_db, monkeypatch):
     assert again["skipped"] == 1              # today's close is already cached
     cached = db.get_cached_price_history(["AAPL"])["AAPL"]
     assert cached["dates"][-1] == today.isoformat()
+
+
+def test_a_five_hundred_symbol_sweep_writes_once(tmp_path, monkeypatch):
+    """Against Postgres each execute is a network round-trip. Writing a row at
+    a time meant a 500-symbol deployment spent 500 of them a sweep and 195,000
+    a day — the sweep would take longer than the interval it runs on, and the
+    cost would grow with the customer list rather than with the market."""
+    db.set_db_path(tmp_path / "sweep.db")
+    db.init_db()
+
+    statements = []
+    real_connect = db.connect
+
+    class Counting:
+        def __init__(self, conn): self._conn = conn
+        def execute(self, sql, *args):
+            statements.append("execute")
+            return self._conn.execute(sql, *args)
+        def executemany(self, sql, seq):
+            statements.append(f"executemany:{len(list(seq)) if not isinstance(seq, list) else len(seq)}")
+            return self._conn.executemany(sql, seq)
+        def __getattr__(self, name): return getattr(self._conn, name)
+
+    class Wrapper:
+        def __enter__(self):
+            self._cm = real_connect()
+            return Counting(self._cm.__enter__())
+        def __exit__(self, *exc): return self._cm.__exit__(*exc)
+
+    monkeypatch.setattr(db, "connect", lambda: Wrapper())
+
+    rows = [(f"SYM{i}", "stock", 100.0 + i, "Technology") for i in range(500)]
+    written = db.cache_quotes(rows)
+
+    assert written == 500
+    assert statements == ["executemany:500"], statements
+
+
+def test_a_sweep_with_nothing_to_write_touches_the_database_not_at_all(tmp_path):
+    db.set_db_path(tmp_path / "sweep2.db")
+    db.init_db()
+    # Every row unpriced: no statement, no connection, no work.
+    assert db.cache_quotes([("AAA", "stock", 0.0, ""), ("BBB", "stock", -1.0, "")]) == 0

@@ -55,27 +55,98 @@ def _parse_rss(xml_text: str, source: str) -> list[dict]:
     return items
 
 
-def match_portfolio_news(items: list[dict], tickers: list[str]) -> list[dict]:
-    """Match headlines to tickers as standalone uppercase words.
+#: Corporate furniture that carries no identity. Stripped from a holding's
+#: name to leave the part a journalist would actually write.
+_NAME_NOISE = re.compile(
+    r"\b("
+    r"inc|corp|corporation|incorporated|company|co|ltd|limited|plc|llc|"
+    r"holdings?|group|technologies|international|"
+    r"adr|ads|sponsored|class\s+[a-c]|common\s+stock|ordinary\s+shares|"
+    r"the"
+    r")\b\.?",
+    re.IGNORECASE,
+)
 
-    Case-sensitive on purpose: the English word "Now" must not match the
-    ticker NOW, and "Robinhood" must not match HOOD.
+#: Issuers and wrappers whose names belong to hundreds of products. "Fidelity"
+#: matched an article about 401(k) millionaires and "State Street" one about
+#: snowbirds; neither was about a holding.
+_NOT_A_COMPANY = {
+    "fidelity", "vanguard", "schwab", "ishares", "proshares", "spdr",
+    "invesco", "state street", "direxion", "global x", "first trust",
+    "jpmorgan", "blackrock", "pimco", "franklin", "t rowe price",
+}
+
+#: A name containing one of these describes a fund rather than a company, and
+#: funds are not what a headline is ever about. Ticker matching still applies.
+#: Matched on word boundaries, not as substrings — "etf" sits inside "Netflix",
+#: which silently disqualified the one holding the feeds talk about most.
+_FUND_WORDS = re.compile(
+    r"\b(etf|fund|trust|index|portfolio|money\s+market|shares|strategy)\b",
+    re.IGNORECASE,
+)
+
+#: Below this a name is an initialism or a common word, and matching it does
+#: more harm than the headline it finds is worth.
+_MIN_ALIAS = 4
+
+
+def company_alias(name: str) -> str | None:
+    """The part of a holding's name a headline would actually use.
+
+    "Alphabet Inc. Class C Common Stock" is never how a story refers to it;
+    "Alphabet" is. Feeds write company names and almost never tickers, which
+    is why a ticker-only matcher found nothing in twenty MarketWatch and CNBC
+    headlines while three of them were about holdings.
+
+    Returns None when what is left cannot safely be matched: a fund, an
+    issuer's own name, or something too short to be more than an initialism.
     """
-    patterns = {
-        ticker: re.compile(rf"(?<![A-Za-z0-9]){re.escape(ticker)}(?![A-Za-z0-9])")
-        for ticker in {t.upper() for t in tickers}
-    }
+    if _FUND_WORDS.search(name or ""):
+        return None
+    core = _NAME_NOISE.sub(" ", name or "")
+    # Punctuation only where it separates rather than spells: the dot in
+    # "JD.com" is part of the name, the one after "Inc" is not.
+    core = re.sub(r"(?<![A-Za-z0-9])[.,]|[.,](?![A-Za-z0-9])", " ", core)
+    core = re.sub(r"\s+", " ", core).strip()
+    if len(core) < _MIN_ALIAS or core.lower() in _NOT_A_COMPANY:
+        return None
+    return core
+
+
+def match_portfolio_news(items: list[dict], tickers: list[str],
+                         names: dict[str, str] | None = None) -> list[dict]:
+    """Match headlines to holdings by ticker or by company name.
+
+    Tickers stay case-sensitive: the English word "Now" must not match the
+    ticker NOW, and "Robinhood" must not match HOOD. Names are matched
+    case-insensitively as whole phrases, because a headline writes "Netflix"
+    and never "NFLX" — and matching only the ticker is why this panel read
+    "no headlines mention your holdings" on a day three of them did.
+    """
+    patterns: dict[str, list[re.Pattern]] = {}
+    for ticker in {t.upper() for t in tickers}:
+        patterns[ticker] = [
+            re.compile(rf"(?<![A-Za-z0-9]){re.escape(ticker)}(?![A-Za-z0-9])")
+        ]
+    for ticker, name in (names or {}).items():
+        alias = company_alias(name)
+        if alias:
+            patterns.setdefault(ticker.upper(), []).append(
+                re.compile(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])",
+                           re.IGNORECASE)
+            )
     matched: list[dict] = []
     for item in items:
         text = f"{item.get('title', '')} {item.get('summary', '')}"
-        for ticker, pattern in patterns.items():
-            if pattern.search(text):
+        for ticker, group in patterns.items():
+            if any(pattern.search(text) for pattern in group):
                 matched.append({**item, "matched_ticker": ticker})
                 break
     return matched
 
 
-async def fetch_news(tickers: list[str] | None = None) -> dict:
+async def fetch_news(tickers: list[str] | None = None,
+                     names: dict[str, str] | None = None) -> dict:
     now = time.time()
     if now - _cache["fetched_at"] < CACHE_TTL_SECONDS and _cache["items"]:
         all_items = _cache["items"]
@@ -108,7 +179,7 @@ async def fetch_news(tickers: list[str] | None = None) -> dict:
         _cache["items"] = all_items
         _cache["fetched_at"] = now
 
-    portfolio_news = match_portfolio_news(all_items, tickers or [])
+    portfolio_news = match_portfolio_news(all_items, tickers or [], names)
 
     return {
         "portfolio_news": portfolio_news[:10],

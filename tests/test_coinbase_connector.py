@@ -118,7 +118,10 @@ def test_resync_removes_sold_coins(isolated_db, monkeypatch):
     summary = _connector().sync()
 
     assert summary["removed"] == 1
-    assert set(_positions()) == {"BTC"}
+    # Closed, not deleted: gone from holdings, still on record so its
+    # transactions and realized result stay in the performance history.
+    assert {p.symbol for p in db.list_positions()} == {"BTC"}
+    assert _positions()["ETH"]["quantity"] == 0
 
 
 def test_sync_never_touches_other_sources(isolated_db, monkeypatch):

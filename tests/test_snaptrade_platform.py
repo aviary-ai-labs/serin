@@ -83,14 +83,23 @@ def _fake_activities():
 
 
 def _wire_fake_backfill(monkeypatch):
-    monkeypatch.setattr(snaptrade, "get_stored_user", lambda: {"userId": "u", "userSecret": "s"})
+    """Mirror the SDK 13 shape: activities hang off `account_information`, take
+    an account_id, and are paginated.
 
-    class FakeReporting:
-        def get_activities(self, **kwargs):
-            return SimpleNamespace(body=_fake_activities())
+    This fake used to expose `transactions_and_reporting.get_activities`, which
+    the SDK has not had since v13 — so these tests passed against an API that
+    does not exist while the real button raised AttributeError. A fake is only
+    worth having if it is wrong in the same ways the real thing is."""
+    monkeypatch.setattr(snaptrade, "get_stored_user", lambda: {"userId": "u", "userSecret": "s"})
+    monkeypatch.setattr(snaptrade, "list_accounts", lambda: [{"id": "acct-1"}])
+
+    class FakeAccountInformation:
+        def get_account_activities(self, account_id=None, offset=0, **kwargs):
+            # One short page: everything on the first call, nothing after.
+            return SimpleNamespace(body=_fake_activities() if not offset else [])
 
     class FakeClient:
-        transactions_and_reporting = FakeReporting()
+        account_information = FakeAccountInformation()
 
     monkeypatch.setattr(snaptrade, "_get_client", lambda: FakeClient())
 

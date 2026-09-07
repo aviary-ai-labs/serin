@@ -10,12 +10,66 @@ from __future__ import annotations
 import html
 import re
 import smtplib
+from collections.abc import Callable
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from backend.config import settings
 from backend.models import Briefing
+
+# Optional replacement delivery path, installed by a commercial pack that can
+# relay through billing's own verified sender — a paying customer's way to
+# "email me my briefing" with no SMTP of their own to configure. `ready_fn`
+# is asked separately from whether a sender is merely installed, because
+# entitlement can change after install (e.g. a self-hosted license expiring):
+# without it, the UI would offer a toggle that silently fails every run.
+_alt_sender: Callable[[Briefing], str] | None = None
+_alt_ready: Callable[[], bool] | None = None
+_alt_recipient: Callable[[], str] | None = None
+
+
+def set_alt_sender(
+    send_fn: Callable[[Briefing], str] | None,
+    ready_fn: Callable[[], bool] | None = None,
+    recipient_fn: Callable[[], str] | None = None,
+) -> None:
+    global _alt_sender, _alt_ready, _alt_recipient
+    _alt_sender = send_fn
+    _alt_ready = ready_fn
+    _alt_recipient = recipient_fn
+
+
+def email_ready() -> bool:
+    if _alt_sender is not None:
+        return _alt_ready() if _alt_ready else True
+    return settings.email_configured
+
+
+def alt_sender_installed() -> bool:
+    """Whether a pack has wired an alternate path — even if it isn't ready
+    right now (e.g. entitlement lapsed). Lets callers give a message about
+    the plan rather than about `.env`, which would be actively wrong here."""
+    return _alt_sender is not None
+
+
+def alt_recipient() -> str:
+    """Who the alt path would send to, for display only — never used to
+    address the actual send, which resolves its own recipient at send time."""
+    if _alt_recipient is None:
+        return ""
+    try:
+        return _alt_recipient() or ""
+    except Exception:
+        return ""
+
+
+def deliver_scheduled_briefing_email(briefing: Briefing) -> str:
+    """The one entry point callers should use — self-host's own SMTP unless
+    a pack has installed something better for this account."""
+    if _alt_sender is not None:
+        return _alt_sender(briefing)
+    return send_briefing_email(briefing)
 
 STYLES = {
     "h1": "font-size:21px;font-weight:700;margin:0 0 14px;padding-bottom:12px;border-bottom:1px solid #d9e4df;color:#17231f",

@@ -31,7 +31,7 @@ function pctText(value) {
   return `${sign}${Math.abs(value).toFixed(2)}%`;
 }
 
-export function StockDetail({ symbol, assetType = 'stock', onClose }) {
+export function StockDetail({ symbol, assetType = 'stock', onClose, hosted = false }) {
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -114,13 +114,17 @@ export function StockDetail({ symbol, assetType = 'stock', onClose }) {
           <span className="stock-detail-stat-label">Market cap</span>
           <span className="stock-detail-stat-value">{formatMarketCap(quote?.market_cap)}</span>
         </div>
-        <div className="stock-detail-stat">
-          <span className="stock-detail-stat-label">Source</span>
-          <span className="stock-detail-stat-value">{quote?.provider || '—'}</span>
-        </div>
+        {/* Which provider serves the data is the operator's concern; on a
+            hosted deployment the customer bought "market data included". */}
+        {!hosted && (
+          <div className="stock-detail-stat">
+            <span className="stock-detail-stat-label">Source</span>
+            <span className="stock-detail-stat-value">{quote?.provider || '—'}</span>
+          </div>
+        )}
       </div>
 
-      <StockChart symbol={symbol} assetType={assetType} currency={currency} />
+      <StockChart symbol={symbol} assetType={assetType} currency={currency} showSource={!hosted} />
     </div>
   );
 }

@@ -76,17 +76,49 @@ def manifests_by_kind(kind: str) -> list[ConnectorManifest]:
 # --- config + enable storage ------------------------------------------------
 
 
+#: Connector config is read constantly — resolving the active market-data
+#: provider alone walks several keys, and a portfolio page does that per
+#: symbol bucket. Each read opened its own database connection, and on a
+#: managed Postgres each connection re-resolved the pooler hostname: profiling
+#: one warm price-history request found 37 connections and 4.9s of DNS, for
+#: 14ms of actual query time.
+#:
+#: Safe to cache precisely because this scope is fixed. These rows belong to
+#: the deployment, not to whoever is signed in — see the docstring below — so
+#: unlike anything user-scoped there is no tenant to leak across. Writes
+#: invalidate immediately; the TTL only bounds how long a second machine can
+#: serve a stale value after the first one changes it.
+_INSTANCE_TTL_SECONDS = 30.0
+_instance_cache: dict[str, tuple[float, str]] = {}
+
+
 def _instance_get(key: str, default: str = "") -> str:
     """Connector config belongs to the deployment, not to whoever is logged in:
     in Cloud one operator key serves every user, and startup tasks that touch
     it have no user at all."""
+    import time
+
+    hit = _instance_cache.get(key)
+    now = time.time()
+    if hit and now - hit[0] < _INSTANCE_TTL_SECONDS:
+        return hit[1] or default
     with scope.using(scope.INSTANCE_SCOPE):
-        return db.get_setting(key, default)
+        value = db.get_setting(key, default)
+    _instance_cache[key] = (now, value)
+    return value
 
 
 def _instance_set(key: str, value: str) -> None:
     with scope.using(scope.INSTANCE_SCOPE):
         db.set_setting(key, value)
+    # Immediate, not TTL-delayed: someone who just saved an API key expects the
+    # next request to use it.
+    _instance_cache.pop(key, None)
+
+
+def forget_instance_cache() -> None:
+    """Drop the connector-config cache — after a restore, or between tests."""
+    _instance_cache.clear()
 
 
 def _config_key(connector_id: str) -> str:

@@ -193,6 +193,20 @@ def test_personal_tier_uses_preprovisioned_user(monkeypatch, fresh_db):
     assert user["userSecret"] == "preprovisioned-secret"
 
 
+def test_personal_tier_refused_when_accounts_are_on(monkeypatch, fresh_db):
+    # The pre-provisioned user is a single brokerage identity. Sharing it across
+    # accounts would show the first connector's holdings to everyone.
+    monkeypatch.setattr(settings, "snaptrade_client_id", "cid")
+    monkeypatch.setattr(settings, "snaptrade_consumer_key", "ckey")
+    monkeypatch.setattr(settings, "snaptrade_user_id", "personal-user-1")
+    monkeypatch.setattr(settings, "snaptrade_user_secret", "preprovisioned-secret")
+    monkeypatch.setattr(snaptrade.scope, "provider_installed", lambda: True)
+    monkeypatch.setattr(snaptrade, "_client", _fake_client())
+
+    with pytest.raises(snaptrade.SnapTradeError, match="partner credentials"):
+        snaptrade.get_or_register_user()
+
+
 def test_connection_portal_url_read_only(configured):
     url = snaptrade.connection_portal_url()
     assert url.startswith("https://app.snaptrade.com/connect/")
@@ -332,6 +346,28 @@ def test_transient_and_unknown_failures_stay_one_line():
     assert "rate-limiting" in snaptrade.error_message(_FakeApiException(429, {}, {})).lower()
     plain = snaptrade.error_message(RuntimeError("socket exploded\nstack line\nstack line"))
     assert plain == "socket exploded"
+
+
+def test_personal_key_failure_names_the_two_settings_that_fix_it():
+    # The free tier's first-run failure. The upstream sentence explains the
+    # policy but not what to set, so the message has to.
+    exc = _FakeApiException(
+        400,
+        {
+            "detail": (
+                "Personal SnapTrade keys are provisioned with their user "
+                "automatically at signup. Use the OAuth bearer flow to access "
+                "the API; registerUser is not available for personal keys."
+            ),
+            "status_code": 400,
+            "code": "1012",
+        },
+        {},
+    )
+    message = snaptrade.error_message(exc)
+    assert "SNAPTRADE_USER_ID" in message
+    assert "SNAPTRADE_USER_SECRET" in message
+    assert "\n" not in message
 
 
 def test_json_string_bodies_are_parsed_too():

@@ -190,15 +190,29 @@ def test_cboe_history_full_depth_and_period_slice(monkeypatch):
     assert recent["history"]["AAPL"]["closes"] == [181.0, 183.0, 185.5]
 
 
-def test_cboe_refresh_and_quote_use_last_close(monkeypatch):
-    _cboe_ok(monkeypatch)
-    connector = cboe.CboeConnector({})
-    assert connector.refresh_prices([_pos("AAPL")])["prices"]["AAPL"] == (185.5, "")
-    q = connector.quote("AAPL", "stock")
+def test_cboe_quote_ranges_come_from_the_series(monkeypatch):
+    """The day's range and the year's exist only in the daily series, so the
+    detail view still reads it. Here nothing answers the quote endpoint, so
+    the price falls back to the last close."""
+    monkeypatch.setattr(cboe, "_fetch_series", lambda s: (CBOE_DATA["data"], None))
+    monkeypatch.setattr(cboe, "_fetch_quote", lambda s: (None, "no Cboe price"))
+    q = cboe.CboeConnector({}).quote("AAPL", "stock")
     assert q["price"] == 185.5
     assert q["previous_close"] == 183.0
     assert q["day_high"] == 186.0
     assert q["provider"] == "cboe"
+
+
+def test_cboe_quote_prefers_the_live_price_over_a_stale_close(monkeypatch):
+    """A daily close can be two sessions old. When the quote endpoint answers,
+    the detail view must show what the dashboard shows — the previous close
+    then being the last settled one, 185.5, not the row before it."""
+    monkeypatch.setattr(cboe, "_fetch_series", lambda s: (CBOE_DATA["data"], None))
+    monkeypatch.setattr(cboe, "_fetch_quote", lambda s: (320.01, None))
+    q = cboe.CboeConnector({}).quote("AAPL", "stock")
+    assert q["price"] == 320.01
+    assert q["previous_close"] == 185.5
+    assert q["day_high"] == 186.0
 
 
 def test_cboe_failure_is_an_error_not_a_crash(monkeypatch):

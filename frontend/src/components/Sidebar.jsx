@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { AllocationDonut, MiniSparkline } from './Charts.jsx';
+import { AllocationDonut } from './Charts.jsx';
+import { StockChart } from './StockChart.jsx';
 import { money, signedMoney, signedPct, brokerLabel, allocColor, positionKey, quantityLabel } from '../format.js';
 
 export function AllocationCard({ portfolio }) {
@@ -122,7 +123,7 @@ function DataNotes({ issues }) {
   );
 }
 
-export function PositionInspector({ position, history, audit, onEdit, onOpenTaxLots }) {
+export function PositionInspector({ position, history, audit, onEdit, onOpenTaxLots, onDelete, showSource = true }) {
   if (!position) {
     return (
       <section className="panel">
@@ -146,12 +147,15 @@ export function PositionInspector({ position, history, audit, onEdit, onOpenTaxL
         <div style={{ display: 'flex', gap: 8 }}>
           {!isCash && <button className="link-btn" onClick={() => onOpenTaxLots(position)}>Tax lots</button>}
           <button className="link-btn" onClick={() => onEdit(position)}>Edit</button>
+          {onDelete && (
+            <button className="link-btn danger" onClick={() => onDelete(position)}>Close</button>
+          )}
         </div>
       </div>
       <div className="side-card-body">
-        {values.length >= 2 && (
-          <div className="inspector-spark">
-            <MiniSparkline dates={history.dates} values={values} baseline={position.average_cost || null} />
+        {!isCash && (
+          <div className="inspector-chart">
+            <StockChart symbol={position.symbol} assetType={position.asset_type} height={190} showSource={showSource} />
           </div>
         )}
         <DataNotes issues={dataIssues} />

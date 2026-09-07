@@ -6,6 +6,7 @@ from backend.connectors.base import (
     ConfigField,
     ConnectorManifest,
     MarketDataConnector,
+    QuoteBudget,
     TestResult,
 )
 from backend.connectors.registry import register
@@ -14,6 +15,11 @@ from backend.providers import fmp as driver
 
 @register
 class FMPConnector(MarketDataConnector):
+    #: stable/quote takes a comma-separated symbol list, so a book costs
+    #: ceil(n/50) requests rather than n. The daily ceiling is the free tier's;
+    #: a paid key raises it, and the cadence follows automatically.
+    quote_budget = QuoteBudget(batch_size=50, per_day=250)
+
     manifest = ConnectorManifest(
         id="fmp",
         name="Financial Modeling Prep",

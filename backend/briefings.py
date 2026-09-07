@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -300,6 +301,51 @@ def friendly_model_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {message}"
 
 
+# Optional replacement for how a briefing's prose is produced, installed by a
+# commercial pack (see backend/entitlements.py for the matching feature seam).
+# Signature: (context: dict) -> awaitable of (markdown, usage), or None.
+#
+# **Additive, and it fails back.** Core keeps its own complete implementation
+# and uses it in three cases: nothing installed, the generator *declines* by
+# returning None, or the generator raises. A briefing is a scheduled job the
+# user may not be watching, so a pack that breaks at 07:30 must cost the
+# richer briefing, never the briefing.
+#
+# Declining is the ordinary path for a lapsed licence and is not logged;
+# raising is a fault and is. Distinguishing them keeps an expired subscription
+# from filling the log with warnings every morning.
+_Generator = Callable[[dict[str, Any]], Awaitable[tuple[str, dict[str, Any]] | None]]
+
+_generator: _Generator | None = None
+
+
+def set_generator(generator: _Generator | None) -> None:
+    """Install (or clear) the briefing generator. Called by commercial packs at
+    plugin-load time; tests may clear it with ``None``."""
+    global _generator
+    _generator = generator
+
+
+def generator_installed() -> bool:
+    return _generator is not None
+
+
+async def _generate(snapshot: dict[str, Any], news: dict[str, Any], style: str) -> tuple[str, dict[str, Any]]:
+    """The installed generator's briefing, or core's own."""
+    if _generator is not None:
+        try:
+            produced = await _generator({"snapshot": snapshot, "news": news, "style": style})
+            if produced is not None:
+                return produced
+        except Exception:
+            logger.warning(
+                "Briefing generator failed; falling back to the built-in briefing",
+                exc_info=True,
+            )
+    prompt = build_briefing_prompt(snapshot, news, style=style)
+    return await call_model(prompt)
+
+
 async def run_daily_briefing(briefing_id: int, style: str = "operator") -> None:
     try:
         style = normalize_briefing_style(style)
@@ -311,8 +357,7 @@ async def run_daily_briefing(briefing_id: int, style: str = "operator") -> None:
             if item["asset_type"] != "cash" and item["symbol"] != "CASH"
         ]
         market_news = await fetch_news(tickers)
-        prompt = build_briefing_prompt(snapshot, market_news, style=style)
-        markdown, usage = await call_model(prompt)
+        markdown, usage = await _generate(snapshot, market_news, style)
         db.finish_briefing(
             briefing_id,
             status="done",
