@@ -886,12 +886,21 @@ def repair_duplicate_backfill(dry_run: bool = True) -> dict[str, Any]:
     }
 
 
-def backfill_transactions(days: int | None = None) -> dict:
+def backfill_transactions(days: int | None = None,
+                          institutions: list[str] | None = None) -> dict:
     """Pull broker activity history into the transactions table.
 
     Idempotent: every imported row is tagged ``snaptrade:<activity_id>`` in its
     notes, and already-imported ids are skipped — re-running only picks up new
     activity. Unknown activity types are counted and reported, never guessed.
+
+    ``institutions`` narrows the import to named brokers. Idempotency already
+    makes a repeat run safe, but "safe" is not the same as controllable: a
+    person who has just imported a Robinhood statement by hand wants to bring
+    in Fidelity without touching Robinhood at all, and asking them to trust the
+    dedupe is asking them to trust it with their cost basis. Matching is on the
+    institution name, case-insensitively, because that is what the accounts
+    carry and what the screen shows.
     """
     from backend.models import TransactionIn
 
@@ -915,8 +924,21 @@ def backfill_transactions(days: int | None = None) -> dict:
     # endpoint moved under the account. It raised AttributeError before any
     # request went out, so the button failed with a generic 502 that looked
     # like a SnapTrade outage. Same shape as the SDK 13 constructor change.
+    wanted = {name.strip().lower() for name in (institutions or []) if name.strip()}
+    accounts = list_accounts()
+    if wanted:
+        accounts = [
+            account for account in accounts
+            if str(account.get("institution") or "").strip().lower() in wanted
+        ]
+        if not accounts:
+            raise SnapTradeError(
+                "No connected accounts at " + ", ".join(sorted(institutions or []))
+                + ". Nothing was imported."
+            )
+
     activities: list = []
-    for account in list_accounts():
+    for account in accounts:
         account_id = account.get("id")
         if not account_id:
             continue

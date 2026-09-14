@@ -180,6 +180,11 @@ export function AgentAccess({ addToast }) {
           agent with no tool support at all, <code>/api/agent/context.md</code>{' '}
           returns the whole portfolio as Markdown.
         </p>
+        <p className="panel-note">
+          Config file locations, a Docker recipe that needs no checkout, and
+          troubleshooting: <a href="/mcp" target="_blank" rel="noreferrer">the
+          full setup guide</a>.
+        </p>
       </details>
     </section>
   );

@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -287,6 +287,65 @@ def _migration_ledger_lifecycle(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tax_lots_symbol ON tax_lots(user_id, symbol)")
 
 
+def _migration_chat_history(conn: sqlite3.Connection) -> None:
+    """Persist chat turns so a conversation survives a reload.
+
+    Deliberately stores only what was on screen — the user's text, the
+    assistant's text, and the names of the tools it consulted for the chips.
+    Tool *results* are not kept: they are bulky, re-derivable, and the most
+    revealing part of the exchange, and the model never sees them again anyway
+    (``chat._sanitise`` strips everything but plain text before replaying a
+    conversation).
+
+    Retention is 30 days, promised in the privacy policy and enforced in two
+    places — a scheduled sweep, and a cutoff on every read, so the promise
+    holds even on a deployment whose sweep has not run.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id TEXT NOT NULL DEFAULT 'local',
+          role TEXT NOT NULL,
+          content TEXT NOT NULL DEFAULT '',
+          tools TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_scope
+          ON chat_messages(user_id, created_at);
+        """
+    )
+
+
+def _migration_news_feed(conn: sqlite3.Connection) -> None:
+    """Persist headlines so News is a feed with a past, not a snapshot.
+
+    Previously the only store was an in-memory cache with a five-minute TTL, so
+    a story dropped out the moment the RSS feed stopped carrying it, and a
+    restart lost everything. "What was said about my holdings last Tuesday" had
+    no answer.
+
+    Deliberately **unscoped**, like price_history and fundamentals: a headline
+    is the same headline for every user, and partitioning it would store one
+    copy per account and re-fetch per account. Which items are *yours* is
+    decided at read time by matching against your holdings.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS news_items (
+          link TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT '',
+          published TEXT NOT NULL DEFAULT '',
+          first_seen TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_news_items_published
+          ON news_items(published DESC);
+        """
+    )
+
+
 MIGRATIONS: list[tuple[int, str, object]] = [
     (1, "baseline schema", _migration_baseline),
     (2, "briefings.trigger + emailed_at", _migration_briefing_columns),
@@ -296,6 +355,8 @@ MIGRATIONS: list[tuple[int, str, object]] = [
     (6, "per-user scoping (user_id + composite uniqueness)", _migration_user_scope),
     (7, "shared quote cache + tracked symbols", _migration_shared_quotes),
     (8, "ledger dedupe + tax-lot lifecycle", _migration_ledger_lifecycle),
+    (9, "chat history", _migration_chat_history),
+    (10, "news feed", _migration_news_feed),
 ]
 
 
@@ -1884,7 +1945,186 @@ def delete_account(account_id: int) -> bool:
 # *not* the whole schema: quotes, price_history, fundamentals, fx_rates and
 # tracked_symbols are a shared cache with no owner, and deleting one person's
 # account must not evict market data every other account reads.
-SCOPED_TABLES = ("positions", "tax_lots", "transactions", "briefings", "accounts", "app_settings")
+# --- chat history -----------------------------------------------------------
+# Core owns this table even though chat itself is a paid, out-of-tree feature.
+# It has to: purge_scope and backup walk core's table lists, so a pack-owned
+# table would be invisible to both — account deletion would leave transcripts
+# behind, and "export everything" would quietly stop being true. Core ships the
+# storage and the retention rule; the pack decides what to put in it.
+
+CHAT_RETENTION_DAYS = 30
+
+
+def _chat_cutoff_iso(days: int = CHAT_RETENTION_DAYS) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+def append_chat_message(role: str, content: str, tools: list[str] | None = None) -> None:
+    """Record one visible turn. Silently does nothing if the table is absent.
+
+    Absence is a real state, not a bug: Postgres deployments get their schema
+    from an owner-run migration the app role is not permitted to perform, so a
+    Cloud instance runs the new code before the table exists. Chat losing its
+    history is a far better outcome there than chat refusing to answer.
+    """
+    try:
+        with connect() as conn:
+            conn.execute(
+                """INSERT INTO chat_messages (user_id, role, content, tools, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (scope.current(), role, content, ",".join(tools or []), utcnow_iso()),
+            )
+    except Exception:
+        logger.debug("chat_messages unavailable; history not recorded", exc_info=True)
+
+
+def list_chat_messages(limit: int = 100) -> list[dict]:
+    """This scope's recent conversation, oldest first.
+
+    The cutoff is applied here as well as by the sweep. The policy promises 30
+    days; a deployment whose scheduler has not run must not answer with a
+    forty-day-old message and make that promise false.
+    """
+    cutoff = _chat_cutoff_iso()          # our code: a bug here must not read as "no table"
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                """SELECT role, content, tools, created_at FROM chat_messages
+                   WHERE user_id=? AND created_at >= ?
+                   ORDER BY id DESC LIMIT ?""",
+                (scope.current(), cutoff, max(1, int(limit))),
+            ).fetchall()
+    except Exception:
+        logger.debug("chat_messages unavailable; returning no history", exc_info=True)
+        return []
+    return [
+        {
+            "role": row["role"],
+            "content": row["content"],
+            "tools": [name for name in (row["tools"] or "").split(",") if name],
+            "created_at": row["created_at"],
+        }
+        for row in reversed(rows)
+    ]
+
+
+def clear_chat_history() -> int:
+    """Delete this scope's conversation. Returns rows removed."""
+    with connect() as conn:
+        cursor = conn.execute("DELETE FROM chat_messages WHERE user_id=?", (scope.current(),))
+    return max(cursor.rowcount or 0, 0)
+
+
+def purge_expired_chat_messages(days: int = CHAT_RETENTION_DAYS) -> int:
+    """Drop this scope's messages past the retention window."""
+    cutoff = _chat_cutoff_iso(days)
+    try:
+        with connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM chat_messages WHERE user_id=? AND created_at < ?",
+                (scope.current(), cutoff),
+            )
+    except Exception:
+        logger.debug("chat_messages unavailable; nothing to sweep", exc_info=True)
+        return 0
+    return max(cursor.rowcount or 0, 0)
+
+
+# --- news feed --------------------------------------------------------------
+# Shared, like the other market-data caches: one copy of a headline serves
+# everyone who holds the symbol it names.
+
+NEWS_RETENTION_DAYS = 30
+
+
+def store_news_items(items: list[dict]) -> int:
+    """Upsert fetched headlines. Returns how many were new.
+
+    ``first_seen`` is preserved on conflict: a feed that keeps re-publishing an
+    item should not keep moving it to the top of the feed forever.
+    """
+    if not items:
+        return 0
+    now = utcnow_iso()
+    try:
+        return _store_news_items(items, now)
+    except Exception:
+        # Absent (Postgres takes its schema from an owner-run migration) or
+        # unreadable (RLS enabled with no policy denies everything). Either way
+        # News should fall back to the live poll, not fail.
+        logger.debug("news_items unavailable; feed not persisted", exc_info=True)
+        return 0
+
+
+def _store_news_items(items: list[dict], now: str) -> int:
+    added = 0
+    with connect() as conn:
+        for item in items:
+            link = (item.get("link") or "").strip()
+            if not link:
+                continue
+            existing = conn.execute(
+                "SELECT 1 FROM news_items WHERE link=?", (link,)
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(
+                """INSERT INTO news_items (link, title, summary, source, published, first_seen)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    link,
+                    item.get("title") or "",
+                    item.get("summary") or "",
+                    item.get("source") or "",
+                    item.get("published") or now,
+                    now,
+                ),
+            )
+            added += 1
+    return added
+
+
+def list_news_items(limit: int = 60, before: str = "") -> list[dict]:
+    """Stored headlines, newest first, optionally starting before a timestamp.
+
+    ``before`` is what makes this a feed rather than a page: the client passes
+    back the oldest ``published`` it has and gets the next slice.
+    """
+    cutoff = (datetime.now(UTC) - timedelta(days=NEWS_RETENTION_DAYS)).isoformat()
+    clause = "WHERE published >= ?"
+    params: list = [cutoff]
+    if before:
+        clause += " AND published < ?"
+        params.append(before)
+    params.append(max(1, min(int(limit), 200)))
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                f"""SELECT link, title, summary, source, published FROM news_items
+                    {clause} ORDER BY published DESC LIMIT ?""",
+                params,
+            ).fetchall()
+    except Exception:
+        logger.debug("news_items unavailable; serving the live poll only", exc_info=True)
+        return []
+    return [dict(row) for row in rows]
+
+
+def purge_expired_news(days: int = NEWS_RETENTION_DAYS) -> int:
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    try:
+        with connect() as conn:
+            cursor = conn.execute("DELETE FROM news_items WHERE published < ?", (cutoff,))
+    except Exception:
+        logger.debug("news_items unavailable; nothing to sweep", exc_info=True)
+        return 0
+    return max(cursor.rowcount or 0, 0)
+
+
+SCOPED_TABLES = (
+    "positions", "tax_lots", "transactions", "briefings", "accounts", "app_settings",
+    "chat_messages",
+)
 
 
 def scoped_tables_present(conn) -> list[str]:

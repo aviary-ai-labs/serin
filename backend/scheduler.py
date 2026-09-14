@@ -289,6 +289,45 @@ async def maybe_email_briefing(briefing_id: int) -> None:
         logger.exception("Failed to email scheduled briefing %s", briefing_id)
 
 
+_last_chat_sweep: datetime | None = None
+CHAT_SWEEP_INTERVAL_SECONDS = 6 * 3600
+
+
+async def maybe_sweep_chat_history(owners: list[str]) -> int:
+    """Delete chat messages past the retention window.
+
+    The privacy policy promises 30 days, so something has to do the deleting.
+    Reads apply the same cutoff independently — a deployment whose scheduler
+    has been down must not start answering with older messages — which makes
+    this the half that reclaims space rather than the half that keeps the
+    promise. Hence a leisurely interval, and never raising.
+    """
+    global _last_chat_sweep
+    now = datetime.now(UTC)
+    if _last_chat_sweep and (now - _last_chat_sweep).total_seconds() < CHAT_SWEEP_INTERVAL_SECONDS:
+        return 0
+    _last_chat_sweep = now
+    removed = 0
+    for owner in owners:
+        try:
+            with scope.using(owner):
+                removed += db.purge_expired_chat_messages()
+        except Exception:
+            logger.exception("Chat retention sweep failed for one scope")
+    if removed:
+        logger.info("Chat retention sweep removed %d expired message(s)", removed)
+
+    # News is unscoped — one shared feed — so it is swept once, not per owner.
+    try:
+        with scope.using(scope.INSTANCE_SCOPE):
+            stale = db.purge_expired_news()
+        if stale:
+            logger.info("News retention sweep removed %d expired item(s)", stale)
+    except Exception:
+        logger.exception("News retention sweep failed")
+    return removed
+
+
 async def check_once(now_utc: datetime | None = None) -> bool:
     now_utc = now_utc or datetime.now(UTC)
     schedule = db.get_schedule()
@@ -432,4 +471,10 @@ async def scheduler_loop() -> None:
             raise
         except Exception:
             logger.exception("Connector auto-sync check failed")
+        try:
+            await maybe_sweep_chat_history(owners)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Chat retention sweep failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)

@@ -18,7 +18,7 @@ import { StockDetail } from './components/StockDetail.jsx';
 import { StockGrid } from './components/StockGrid.jsx';
 import { ConnectorsView } from './components/Connectors.jsx';
 import { AgentAccess } from './components/AgentAccess.jsx';
-import { useChat, ChatView } from './components/ChatPanel.jsx';
+import { useChat, ChatView, ChatLauncher } from './components/ChatPanel.jsx';
 import { SmartImport } from './components/SmartImport.jsx';
 import { IconRefresh, IconUpload, IconDownload, IconPlus, IconLink, IconSignOut, IconX, IconBell, IconMore } from './components/Icons.jsx';
 import { SerinBird } from './components/SerinBird.jsx';
@@ -185,6 +185,9 @@ function NavIcon({ id }) {
           means 'data connector'. */}
       {id === 'brokerages' && <><path d="M3 9.5 12 4l9 5.5" /><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8" /><path d="M3 21h18" /></>}
       {id === 'connectors' && <><path d="M8 3v6M16 3v6M6 9h12v3a6 6 0 0 1-6 6v3M4 9h16" /></>}
+      {/* The same message-circle as the floating launcher, so the tab and the
+          button are visibly one feature. */}
+      {id === 'chat' && <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.9 9.9 0 0 1-3.6-.7L3 21l1.9-4.9A8.3 8.3 0 0 1 3.6 11.5a8.4 8.4 0 0 1 8.7-8.4 8.4 8.4 0 0 1 8.7 8.4z" />}
     </svg>
   );
 }
@@ -303,6 +306,7 @@ export default function App() {
   const [brokerStatus, setBrokerStatus] = useState(null);
   const [news, setNews] = useState(null);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [newsLoadingMore, setNewsLoadingMore] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [locked, setLocked] = useState(false);
   const [account, setAccount] = useState(null); // { email } when signed in on a multiuser host
@@ -500,6 +504,27 @@ export default function App() {
       addToast('error', `News: ${error.message}`);
     } finally {
       setNewsLoading(false);
+    }
+  }
+
+  // Paging appends rather than replaces, and passes the oldest item it already
+  // holds — so going further back never re-polls the feeds.
+  async function loadOlderNews() {
+    if (!news?.next_before || newsLoadingMore) return;
+    setNewsLoadingMore(true);
+    try {
+      const older = await api(`/api/news?before=${encodeURIComponent(news.next_before)}`);
+      setNews(current => ({
+        ...older,
+        portfolio_news: [...(current.portfolio_news || []), ...(older.portfolio_news || [])],
+        market_news: [...(current.market_news || []), ...(older.market_news || [])],
+        // An empty slice is the end of the feed, whatever the server guessed.
+        has_more: older.has_more && (older.market_news?.length || 0) > 0,
+      }));
+    } catch (error) {
+      addToast('error', `News: ${error.message}`);
+    } finally {
+      setNewsLoadingMore(false);
     }
   }
 
@@ -1122,7 +1147,8 @@ export default function App() {
       )}
 
       {tab === 'news' && (
-        <NewsView news={news} loading={newsLoading} onRefresh={refreshNews} />
+        <NewsView news={news} loading={newsLoading} onRefresh={refreshNews}
+          onLoadMore={loadOlderNews} loadingMore={newsLoadingMore} />
       )}
 
       {tab === 'transactions' && (
@@ -1162,6 +1188,10 @@ export default function App() {
           <AgentAccess addToast={addToast} />
         </>
       )}
+
+      {/* One tap into chat from any page. Hidden on the chat tab itself,
+          where it would only cover the conversation it opens. */}
+      <ChatLauncher chat={chat} hidden={tab === 'chat'} />
 
       <footer className="footer-note">
         <span>Serin · AI portfolio intelligence</span>

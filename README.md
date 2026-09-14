@@ -150,6 +150,10 @@ is whichever one you already pay for.
 once and stored only as a hash. Tokens are scoped to `/api/agent`: one cannot
 change a position, download a backup, or create another token.
 
+*Full setup guide — config-file locations per client, a Docker recipe that
+needs no checkout, and troubleshooting — is [docs/MCP.md](docs/MCP.md), served
+at `/mcp` on a running instance.*
+
 **2a. Remote MCP (nothing to install)** — if your client supports remote MCP
 servers, point it at `https://your-serin/api/agent/mcp` with the token as a
 bearer credential. One endpoint, streamable HTTP, stateless.

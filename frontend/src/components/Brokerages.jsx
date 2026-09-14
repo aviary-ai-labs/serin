@@ -101,8 +101,17 @@ export function Brokerages({ onError, onChanged, onViewTransactions }) {
     }
   }
 
-  async function backfill({ automatic = false } = {}) {
-    setBusy('backfill');
+  async function backfillOne(institution, label) {
+    if (!window.confirm(
+      `Import ${label} transaction history?\n\n` +
+      `Only ${label} activity is imported — other brokers are left untouched. ` +
+      `Re-running is safe: activity already on record is skipped.`
+    )) return;
+    return backfill({ institutions: [institution], busyKey: `backfill:${institution}` });
+  }
+
+  async function backfill({ automatic = false, institutions = null, busyKey = 'backfill' } = {}) {
+    setBusy(busyKey);
     // On the automatic path the holdings notice is already on screen and is
     // still true; clearing it would blank the panel mid-flow for the several
     // seconds a full history takes.
@@ -112,13 +121,16 @@ export function Brokerages({ onError, onChanged, onViewTransactions }) {
         // No window: the account's whole history. Asking for a year was our
         // own limit and it is what turned older purchases into sales with no
         // cost basis, which cannot be counted as gains at all.
-        method: 'POST', body: JSON.stringify({}),
+        // institutions omitted means every connected broker; naming one
+        // imports only that broker's activity.
+        method: 'POST', body: JSON.stringify(institutions ? { institutions } : {}),
       });
       // Re-running is safe and normal, so say what actually happened rather
       // than implying every run should import something.
       setNotice(
         (automatic ? `${previousNotice.current} ` : '') +
         `Imported ${result.imported} transactions` +
+        (institutions ? ` from ${institutions.join(', ')}` : '') +
         (result.skipped_existing ? `, skipped ${result.skipped_existing} already on record` : '') +
         // Named separately from "already on record": these matched a row that
         // arrived from somewhere else (a broker CSV), which is the case people
@@ -201,7 +213,8 @@ export function Brokerages({ onError, onChanged, onViewTransactions }) {
                         onViewTransactions={onViewTransactions}
                         connections={connections}
                         busy={busy}
-                        onDisconnect={disconnect} />
+                        onDisconnect={disconnect}
+                        onBackfill={backfillOne} />
 
         <div className="brokerage-actions">
           <button className="btn btn-ghost btn-sm" disabled={busy === 'sync'} onClick={sync}>

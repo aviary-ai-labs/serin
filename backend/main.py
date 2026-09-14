@@ -613,7 +613,7 @@ def api_price_history(period: str = Query(default="3m"), refresh: bool = Query(d
 
 
 @app.get("/api/news")
-async def api_news():
+async def api_news(before: str = "", limit: int = 60):
     held = [
         position
         for position in db.list_positions()
@@ -623,6 +623,8 @@ async def api_news():
     return await fetch_news(
         [position.symbol for position in held],
         {position.symbol: position.name or "" for position in held},
+        before=before,
+        limit=limit,
     )
 
 
@@ -781,6 +783,10 @@ class BackfillRequest(BaseModel):
     #: None means the account's entire history, which is the sensible default:
     #: a shorter window turns old purchases into sales with no cost basis.
     days: int | None = None
+    #: Empty means every connected broker. Naming one imports only that
+    #: broker's activity, so a ledger built by hand elsewhere can be left
+    #: alone rather than trusted to the dedupe.
+    institutions: list[str] | None = None
 
 
 async def api_broker_backfill(body: BackfillRequest | None = None):
@@ -800,8 +806,9 @@ async def api_broker_backfill(body: BackfillRequest | None = None):
     days = body.days if body else None
     if days is not None:
         days = max(1, min(days, 3650))
+    institutions = body.institutions if body else None
     try:
-        return await asyncio.to_thread(snaptrade.backfill_transactions, days)
+        return await asyncio.to_thread(snaptrade.backfill_transactions, days, institutions)
     except snaptrade.SnapTradeError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
@@ -1615,6 +1622,7 @@ if dist_dir.exists():
         "deploy": (REPO_ROOT / "docs" / "DEPLOY.md", "Deploy"),
         "contact": (REPO_ROOT / "docs" / "CONTACT.md", "Contact"),
         "exports": (REPO_ROOT / "docs" / "BROKER-EXPORTS.md", "Broker exports"),
+        "mcp": (REPO_ROOT / "docs" / "MCP.md", "Connect your AI"),
     }
     _doc_cache: dict[str, tuple[float, str]] = {}
 

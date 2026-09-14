@@ -13,7 +13,7 @@ import { brokerLabel, money } from '../format.js';
  * what it holds — so that is what this shows.
  */
 export function BrokerAccounts({ refreshKey, onViewTransactions,
-                                 connections = [], busy, onDisconnect }) {
+                                 connections = [], busy, onDisconnect, onBackfill }) {
   const [data, setData] = useState(null);
   const [open, setOpen] = useState(null);
 
@@ -68,13 +68,27 @@ export function BrokerAccounts({ refreshKey, onViewTransactions,
               <b>{brokerLabel(institution)}</b>
               <span className="account-sub">{connectionState(connection, accounts)}</span>
             </div>
-            {connection && onDisconnect && (
-              <button type="button" className="btn btn-ghost btn-sm"
-                      disabled={busy === connection.id}
-                      onClick={() => onDisconnect(connection)}>
-                {busy === connection.id ? 'Removing…' : 'Disconnect'}
-              </button>
-            )}
+            <div className="accounts-group-actions">
+              {/* Importing one broker at a time is the safe move when a ledger
+                  was built by hand elsewhere: the dedupe would cope, but this
+                  does not ask anyone to take that on trust with their cost
+                  basis. */}
+              {onBackfill && accounts.length > 0 && (
+                <button type="button" className="btn btn-ghost btn-sm"
+                        disabled={Boolean(busy)}
+                        title={`Import only ${brokerLabel(institution)} activity`}
+                        onClick={() => onBackfill(accounts[0].institution, brokerLabel(institution))}>
+                  {busy === `backfill:${accounts[0].institution}` ? 'Importing…' : 'Import history'}
+                </button>
+              )}
+              {connection && onDisconnect && (
+                <button type="button" className="btn btn-ghost btn-sm"
+                        disabled={busy === connection.id}
+                        onClick={() => onDisconnect(connection)}>
+                  {busy === connection.id ? 'Removing…' : 'Disconnect'}
+                </button>
+              )}
+            </div>
           </div>
           <ul className="accounts-list">
             {accounts.map(account => (

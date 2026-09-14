@@ -4720,41 +4720,117 @@ button.realized-fig:focus-visible {
 }
 
 /* --- Chat (pack-driven renderer) ---------------------------------------- */
+/*
+   Typography follows the rest of the app rather than the browser's defaults,
+   which is what the first version inherited: chat markdown was the only prose
+   in Serin with no rules of its own, so it rendered at default sizes and
+   default paragraph margins next to a UI set in 14.5px/1.6.
 
-.chat-panel { display: flex; flex-direction: column; gap: 12px; }
+   The reading column is capped. On a wide screen the panel is over a thousand
+   pixels across, and a full-width paragraph is unreadable — the eye loses the
+   line on the way back. ~66 characters is the usual comfortable measure.
+*/
+
+/* .panel supplies background and border but no padding — every panel adds its
+   own, and this one never did, so the conversation sat flush against the card
+   edge. 24px horizontal is what the rest of the app uses (.panel-header and
+   .news-item both). */
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 24px 18px;
+  font-family: var(--font);
+}
+
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--bd);
+}
+.chat-retention { font-size: 11px; color: var(--text-muted); letter-spacing: 0.01em; }
 
 .chat-log {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 20px;               /* between turns; within a turn the markdown spaces itself */
   min-height: 320px;
   max-height: 60vh;
   overflow-y: auto;
-  padding-right: 4px;
+  padding-right: 6px;
 }
-.chat-empty { margin: auto; max-width: 46ch; text-align: center; }
+.chat-empty {
+  margin: auto;
+  max-width: 44ch;
+  text-align: center;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
 
-.chat-message { max-width: 78%; padding: 10px 13px; border-radius: var(--r-card); font-size: 14px; }
-.chat-message p { margin: 0; }
+.chat-message { max-width: min(66ch, 88%); font-size: 14.5px; line-height: 1.6; }
+.chat-message p { margin: 0 0 10px; }
+.chat-message p:last-child { margin-bottom: 0; }
+
+/* The reader's own words: short, and a bubble marks them as an aside. The
+   assistant's answer is the content of the page, so it sits on the surface
+   without a container fighting it. */
 .chat-message-user {
   align-self: flex-end;
+  max-width: min(52ch, 82%);
+  padding: 9px 14px;
+  border-radius: 16px 16px 4px 16px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
+  color: var(--text-primary);
 }
-.chat-message-assistant { align-self: flex-start; background: var(--bg-card); }
+.chat-message-assistant { align-self: flex-start; color: var(--text-secondary); }
+.chat-message-assistant strong { color: var(--text-primary); font-weight: 700; }
 
-.chat-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.chat-tool-chip {
-  padding: 2px 8px;
-  border-radius: var(--r-pill);
+/* Markdown inside a message. Scoped here because .markdown-body carries almost
+   nothing on its own — the briefing view supplies its own set the same way. */
+.chat-message .markdown-body > *:first-child { margin-top: 0; }
+.chat-message .markdown-body > *:last-child { margin-bottom: 0; }
+.chat-message .markdown-body h1,
+.chat-message .markdown-body h2,
+.chat-message .markdown-body h3 {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  margin: 18px 0 8px;
+}
+.chat-message .markdown-body ul,
+.chat-message .markdown-body ol { margin: 0 0 10px; padding-left: 20px; }
+.chat-message .markdown-body li { margin: 4px 0; }
+.chat-message .markdown-body blockquote {
+  margin: 10px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+.chat-message .markdown-body code {
+  padding: 1px 5px;
+  border-radius: 5px;
   background: var(--bg-inset);
-  border: 1px solid var(--border);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
+  font-size: 0.9em;
+}
+.chat-message .md-table-wrap { overflow-x: auto; margin: 10px 0; }
+.chat-message .md-table { font-size: 13px; border-collapse: collapse; }
+.chat-message .md-table th,
+.chat-message .md-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
 }
 
-.chat-thinking { align-self: flex-start; font-size: 13px; color: var(--text-muted); }
+.chat-thinking { align-self: flex-start; font-size: 13.5px; color: var(--text-muted); }
 .chat-error { color: var(--accent-red); }
 
 .chat-composer { display: flex; gap: 10px; align-items: flex-end; }
@@ -4762,18 +4838,141 @@ button.realized-fig:focus-visible {
   flex: 1;
   resize: vertical;
   min-height: 46px;
-  padding: 10px 12px;
+  padding: 11px 13px;
   border: 1px solid var(--border);
   border-radius: var(--r-btn);
   background: var(--bg-card);
   color: var(--text-primary);
-  font: inherit;
-  font-size: 14px;
+  font-family: var(--font);
+  font-size: 14.5px;
+  line-height: 1.5;
 }
+.chat-composer textarea::placeholder { color: var(--text-muted); }
 
-.chat-disclaimer { margin: 0; font-size: 12px; color: var(--text-muted); text-align: center; }
+.chat-disclaimer { margin: 0; font-size: 11.5px; color: var(--text-muted); text-align: center; }
 
 @media (max-width: 560px) {
+  /* No padding override: every other card here keeps 24px at this width, and
+     chat looked cramped precisely because it did not. */
   .chat-message { max-width: 92%; }
-  .chat-log { max-height: 55vh; }
+  .chat-message-user { max-width: 88%; }
+  .chat-log { max-height: 55vh; gap: 16px; }
+}
+
+/* --- Floating chat launcher --------------------------------------------- */
+/* One tap into chat from any page. Sits clear of the iOS home indicator, and
+   above the sidebar (z-index 20) without reaching drawer level (200) — a
+   drawer opened over the top should still cover it. */
+
+.chat-fab {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--acc);
+  color: #fffaf1;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(20, 24, 34, 0.22);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.chat-fab:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(20, 24, 34, 0.26); }
+.chat-fab:active { transform: translateY(0); }
+.chat-fab:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+/* An explicit display on the element beats the user-agent stylesheet's
+   [hidden] { display: none }, so Close set the attribute and changed nothing
+   on screen. Any element given a display needs its own hidden rule. */
+.chat-dock[hidden] { display: none; }
+
+.chat-dock {
+  position: fixed;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 66px);
+  z-index: 120;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(620px, calc(100dvh - 140px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-card);
+  background: var(--card);
+  box-shadow: 0 12px 40px rgba(20, 24, 34, 0.24);
+}
+.chat-dock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--bd);
+}
+/* The docked copy is already inside a card, so it drops the panel chrome and
+   gives its height to the conversation. */
+.chat-dock .panel { border: 0; box-shadow: none; margin: 0; padding: 14px 20px 16px; }
+.chat-dock .chat-log { min-height: 220px; max-height: 46vh; }
+.chat-dock .chat-disclaimer { font-size: 11px; }
+
+/* On a phone the dock is the page — a 420px card floating over content just
+   hides the content it is meant to be about. */
+@media (max-width: 560px) {
+  .chat-dock {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    bottom: calc(max(12px, env(safe-area-inset-bottom)) + 62px);
+    max-height: calc(100dvh - 120px);
+  }
+  .chat-dock .chat-log { max-height: none; flex: 1; }
+  .chat-fab { width: 50px; height: 50px; }
+}
+
+
+/* --- News feed ----------------------------------------------------------- */
+/* The feed carries thirty days, so it needs day markers — undated, that much
+   history reads as one undifferentiated pile. */
+
+.news-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.news-day {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 24px;
+  background: var(--card);
+  border-bottom: 1px solid var(--bd);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.news-more { padding: 14px 24px 18px; text-align: center; }
+
+@media (max-width: 560px) {
+  .news-toolbar { flex-direction: column; align-items: stretch; gap: 8px; }
+  .news-day { padding: 8px 16px; }
+}
+
+/* Per-brokerage actions sit together on the group's header line. */
+.accounts-group-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+@media (max-width: 560px) {
+  .accounts-group-actions { gap: 4px; }
+  .accounts-group-actions .btn { padding-left: 8px; padding-right: 8px; }
 }

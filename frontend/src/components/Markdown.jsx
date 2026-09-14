@@ -122,6 +122,10 @@ export function MarkdownRenderer({ content }) {
       return;
     }
     flushLists();
+    if (line.startsWith('> ')) {
+      blocks.push(<blockquote key={index}><InlineText text={line.slice(2)} /></blockquote>);
+      return;
+    }
     if (/^-{3,}$/.test(line) || /^\*{3,}$/.test(line)) blocks.push(<hr key={index} />);
     else if (line.startsWith('### ')) blocks.push(<h3 key={index}>{line.slice(4)}</h3>);
     else if (line.startsWith('## ')) blocks.push(<h2 key={index}>{line.slice(3)}</h2>);

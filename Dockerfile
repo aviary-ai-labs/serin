@@ -33,7 +33,7 @@ COPY backend ./backend
 # and release runbooks that have no business in a shipped image. The cost is
 # that a new public page must be added here too — /contact answered 404 in
 # production for exactly that reason.
-COPY docs/CONNECTORS.md docs/PRIVACY-POLICY.md docs/TERMS.md docs/DEPLOY.md docs/CONTACT.md docs/BROKER-EXPORTS.md ./docs/
+COPY docs/CONNECTORS.md docs/PRIVACY-POLICY.md docs/TERMS.md docs/DEPLOY.md docs/CONTACT.md docs/BROKER-EXPORTS.md docs/MCP.md ./docs/
 # Served at /security by the policy-page routes, alongside the docs above.
 COPY SECURITY.md ./SECURITY.md
 COPY --from=frontend /app/frontend/dist ./frontend/dist

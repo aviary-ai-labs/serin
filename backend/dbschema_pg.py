@@ -121,6 +121,32 @@ CREATE TABLE IF NOT EXISTS app_settings (
   PRIMARY KEY (user_id, key)
 );
 
+-- Chat transcripts. Only what was on screen: the text of each turn and the
+-- names of the tools consulted, never the tool results. Retention is 30 days,
+-- enforced by a scheduled sweep and again by a cutoff on every read.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGSERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'local',
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  tools TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_scope ON chat_messages(user_id, created_at);
+
+-- Shared news feed. Unscoped for the same reason as the caches below: a
+-- headline is the same headline for everyone, and which items are *yours* is
+-- decided at read time by matching against your holdings.
+CREATE TABLE IF NOT EXISTS news_items (
+  link TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  published TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_items_published ON news_items(published DESC);
+
 -- Shared market-data caches: one fetch serves every user.
 CREATE TABLE IF NOT EXISTS price_history (
   symbol TEXT NOT NULL,

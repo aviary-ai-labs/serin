@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 FEEDS = [
     {
@@ -145,44 +149,69 @@ def match_portfolio_news(items: list[dict], tickers: list[str],
     return matched
 
 
+async def _poll_feeds() -> list[dict]:
+    """Every configured feed, deduplicated by link, newest first."""
+    all_items: list[dict] = []
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        for feed in FEEDS:
+            try:
+                response = await client.get(feed["url"])
+                if response.status_code == 200:
+                    all_items.extend(_parse_rss(response.text, feed["source"])[:12])
+            except Exception:
+                logger.debug("news feed %s unavailable", feed.get("source"), exc_info=True)
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in all_items:
+        link = item.get("link") or ""
+        if link and link in seen:
+            continue
+        seen.add(link)
+        deduped.append(item)
+    deduped.sort(key=lambda item: item.get("published", ""), reverse=True)
+    return deduped
+
+
 async def fetch_news(tickers: list[str] | None = None,
-                     names: dict[str, str] | None = None) -> dict:
-    now = time.time()
-    if now - _cache["fetched_at"] < CACHE_TTL_SECONDS and _cache["items"]:
-        all_items = _cache["items"]
-    else:
-        all_items = []
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            for feed in FEEDS:
-                try:
-                    response = await client.get(
-                        feed["url"],
-                        headers={
-                            "User-Agent": "serin-local/0.1",
-                            "Accept": "application/rss+xml, application/xml, text/xml",
-                        },
-                    )
-                    if response.status_code == 200:
-                        all_items.extend(_parse_rss(response.text, feed["source"])[:12])
-                except Exception:
-                    continue
+                     names: dict[str, str] | None = None,
+                     before: str = "",
+                     limit: int = 60) -> dict:
+    """The news feed: everything stored, newest first, not just this fetch.
 
-        seen: set[str] = set()
-        deduped: list[dict] = []
-        for item in all_items:
-            key = item["title"].lower()[:80]
-            if key not in seen:
-                seen.add(key)
-                deduped.append(item)
-        deduped.sort(key=lambda item: item.get("published", ""), reverse=True)
-        all_items = deduped
-        _cache["items"] = all_items
-        _cache["fetched_at"] = now
+    Headlines used to live only in a five-minute in-memory cache, so a story
+    vanished the moment the RSS feed stopped carrying it and a restart lost the
+    lot. Now each fetch upserts into ``news_items`` and the feed is read back
+    from there, which is what lets it have a past — and what makes paging
+    possible at all.
 
-    portfolio_news = match_portfolio_news(all_items, tickers or [], names)
+    ``before`` pages further back and skips the network entirely: asking for
+    older news is not a reason to re-poll the feeds.
+    """
+    from backend import db
 
+    if not before:
+        now = time.time()
+        if now - _cache["fetched_at"] >= CACHE_TTL_SECONDS or not _cache["items"]:
+            fetched = await _poll_feeds()
+            if fetched:
+                _cache["items"] = fetched
+                _cache["fetched_at"] = now
+                await asyncio.to_thread(db.store_news_items, fetched)
+
+    stored = await asyncio.to_thread(db.list_news_items, limit, before)
+    # A brand-new install has nothing stored yet but may have just polled.
+    items = stored or (_cache["items"][:limit] if not before else [])
+
+    portfolio_news = match_portfolio_news(items, tickers or [], names)
     return {
-        "portfolio_news": portfolio_news[:10],
-        "market_news": all_items[:20],
+        "portfolio_news": portfolio_news,
+        "market_news": items,
         "fetched_at": _cache["fetched_at"],
+        # The oldest thing in this slice: hand it back to page further.
+        "next_before": items[-1]["published"] if items else "",
+        # A full slice is the only evidence there might be more. Offering "load
+        # older" whenever a cursor exists put a button on a feed that was
+        # already showing everything it had, and clicking it did nothing.
+        "has_more": len(items) >= limit,
+        "retention_days": db.NEWS_RETENTION_DAYS,
     }

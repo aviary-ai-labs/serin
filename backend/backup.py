@@ -26,7 +26,12 @@ BACKUP_FORMAT = 1
 
 # Tables included in a backup, in restore order (no FK dependencies between
 # them, but stable order keeps diffs readable).
-_TABLES = ("positions", "tax_lots", "transactions", "accounts", "briefings", "app_settings")
+_TABLES = (
+    "positions", "tax_lots", "transactions", "accounts", "briefings", "app_settings",
+    # "Export everything" is a stated control and is never a paid feature, so a
+    # table that holds user content has to be in here the day it exists.
+    "chat_messages",
+)
 
 # Settings rows that are machine-local state rather than user data.
 _SETTINGS_SKIP_PREFIXES = ("connector_auto_sync_state",)
